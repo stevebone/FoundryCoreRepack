@@ -1,7 +1,9 @@
 [zip]
 https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Dep.zip
 https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip
+https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/HotfixesDB.zip
 [sql]
 [other]
 [gdrive]
 https://drive.google.com/open?id=1DA1fxJvLeXVamQ0OD7dA6c38YOkllaKm
+[data]
