@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptVersion = "21082026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -151,6 +152,7 @@ function Parse-Manifest
         "gdrive" = @{}
         "data"   = @{}
         "genai"  = @{}
+        "script" = @{}
     }
 
     $currentSection = ""
@@ -196,6 +198,7 @@ function Compare-Manifest
         "gdrive" = @{}
         "data"   = @{}
         "genai"  = @{}
+        "script" = @{}
     }
 
     if (!$LocalSections) {
@@ -604,6 +607,34 @@ Write-Host "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up
 Write-Host "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
 Write-Host "  Data files:   $dataTotal" -ForegroundColor White
 Write-Host "  GenAI files:  $genaiTotal ($genaiChanged changed)" -ForegroundColor White
+
+# Step 4c: Check for script self-update
+if ($sections["script"].Count -gt 0) {
+    foreach ($id in $sections["script"].Keys) {
+        $remoteScriptVersion = $sections["script"][$id].Version
+        $remoteScriptUrl = $sections["script"][$id].Url
+        if ($remoteScriptVersion -ne $scriptVersion) {
+            Write-Host ""
+            Write-Host "[Update] Script update available: v=$scriptVersion -> v=$remoteScriptVersion" -ForegroundColor Yellow
+            Write-Host "[Update] Downloading new script..." -ForegroundColor Cyan
+            $tempScript = Join-Path $scriptDir "FoundryCoreRepack.ps1.new"
+            if (Download-File -Url $remoteScriptUrl -Destination $tempScript) {
+                $currentScript = $MyInvocation.MyCommand.Path
+                Move-Item -Path $tempScript -Destination $currentScript -Force
+                Write-Host "[Update] Script updated to version $remoteScriptVersion." -ForegroundColor Green
+                Write-Host "[Update] Please restart the launcher to apply the update." -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "Press any key to exit..." -ForegroundColor White
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                exit 0
+            } else {
+                Write-Host "[Update] Failed to download new script. Continuing with current version." -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  Script:       v=$scriptVersion (up-to-date)" -ForegroundColor DarkGray
+        }
+    }
+}
 
 # Step 5: Download only changed files
 Download-ZipFiles -Files $changed["zip"]
