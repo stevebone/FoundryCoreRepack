@@ -62,7 +62,8 @@ function Write-Config
     param(
         [bool]$FirstTime,
         [int]$DbSetup = 0,
-        [int]$DataSetup = 0
+        [int]$DataSetup = 0,
+        [int]$UpdatesCleaned = 0
     )
 
     $timestamp = (Get-Date).ToString("o")
@@ -71,9 +72,10 @@ function Write-Config
     $lines += "LastUpdated=$timestamp"
     $lines += "MySqlDBSetup=$DbSetup"
     $lines += "ServerDataSetup=$DataSetup"
+    $lines += "UpdatesCleaned=$UpdatesCleaned"
 
     $lines | Out-File -FilePath $configFile -Encoding UTF8 -Force
-    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup, ServerDataSetup=$DataSetup" -ForegroundColor DarkGray
+    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup, ServerDataSetup=$DataSetup, UpdatesCleaned=$UpdatesCleaned" -ForegroundColor DarkGray
 }
 
 function Download-File
@@ -817,7 +819,194 @@ if ($dbSetupDone) {
 }
 
 # Update repack.conf with DB setup and data setup status
-Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 })
+$updatesCleanedVal = if ($config -and $config["UpdatesCleaned"] -eq "1") { 1 } else { 0 }
+Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -UpdatesCleaned $updatesCleanedVal
 
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
+
+# Step 11: Server Launcher Menu
+$serverDir = Join-Path $scriptDir "Server"
+$bnetExe = Join-Path $serverDir "bnetserver.exe"
+$worldExe = Join-Path $serverDir "worldserver.exe"
+
+function Run-UpdatesCleanup
+{
+    $mysqlExeCheck = Join-Path $mysqlDir "bin\mysql.exe"
+    $cleanupSql = Join-Path $scriptDir "sql\Fixes\updates_cleanup.sql"
+
+    if (!(Test-Path $cleanupSql)) {
+        Write-Host "[Updates] Cleanup SQL file not found: $cleanupSql" -ForegroundColor Red
+        return
+    }
+
+    Write-Host "[Updates] Running updates cleanup SQL..." -ForegroundColor Cyan
+
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Get-Content $cleanupSql -Raw | & $mysqlExeCheck -u root -proot 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+    $ErrorActionPreference = $prevEAP
+
+    Write-Host "[Updates] Cleanup complete." -ForegroundColor Green
+}
+
+function Ensure-MySQLRunning
+{
+    Write-Host "Checking if MySQL is running..." -ForegroundColor White
+    $mysqlProc = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
+    if ($mysqlProc) {
+        Write-Host "[MySQL] MySQL is already running." -ForegroundColor Green
+    } else {
+        Write-Host "MySQL is not running. Attempting to start the MySQL server." -ForegroundColor Yellow
+
+        if (!(Test-Path $mysqldExe)) {
+            Write-Host "[MySQL] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
+            return $false
+        }
+
+        if (Test-Path $myIni) {
+            Push-Location $mysqlDir
+            Start-Process -FilePath $mysqldExe -ArgumentList "--defaults-file=`"$myIni`"" -NoNewWindow -PassThru | Out-Null
+            Pop-Location
+        } else {
+            Push-Location $mysqlDir
+            Start-Process -FilePath $mysqldExe -NoNewWindow -PassThru | Out-Null
+            Pop-Location
+        }
+
+        Write-Host "[MySQL] Waiting for MySQL to be ready..." -ForegroundColor White
+        $mysqlExeCheck = Join-Path $mysqlDir "bin\mysql.exe"
+        $mysqlReady = $false
+        $maxRetries = 60
+        $retryCount = 0
+
+        while (!$mysqlReady -and $retryCount -lt $maxRetries) {
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                $result = & $mysqlExeCheck -u root -proot -e "SELECT 1;" 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $mysqlReady = $true
+                } else {
+                    $retryCount++
+                    Start-Sleep -Seconds 1
+                }
+            } catch {
+                $retryCount++
+                Start-Sleep -Seconds 1
+            }
+            $ErrorActionPreference = $prevEAP
+        }
+
+        if (!$mysqlReady) {
+            Write-Host "[MySQL] MySQL did not become ready after $maxRetries seconds." -ForegroundColor Red
+            return $false
+        }
+
+        Write-Host "[MySQL] MySQL is ready!" -ForegroundColor Green
+    }
+
+    # Run updates cleanup once (if not already done per config)
+    $currentConfig = Read-Config
+    if (!$currentConfig -or $currentConfig["UpdatesCleaned"] -ne "1") {
+        Run-UpdatesCleanup
+        Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -UpdatesCleaned 1
+        Write-Host "[Updates] UpdatesCleaned flag set to 1 in repack.conf." -ForegroundColor DarkGray
+    }
+
+    return $true
+}
+
+while ($true) {
+    Write-Host ""
+    Write-Host "Repack Ready. What do you want to do?" -ForegroundColor Cyan
+    Write-Host "  1. Start BnetServer" -ForegroundColor White
+    Write-Host "  2. Start WorldServer" -ForegroundColor White
+    Write-Host "  3. Start Both Servers" -ForegroundColor White
+    Write-Host "  4. Server Operations" -ForegroundColor White
+    Write-Host "  5. Exit" -ForegroundColor White
+    Write-Host ""
+    $mainChoice = Read-Host "Enter your choice (1/2/3/4/5)"
+
+    switch ($mainChoice) {
+        "1" {
+            if (!(Ensure-MySQLRunning)) {
+                Write-Host "[Server] Cannot start BnetServer without MySQL." -ForegroundColor Red
+                break
+            }
+            if (Test-Path $bnetExe) {
+                Write-Host "[Server] Starting BnetServer..." -ForegroundColor Green
+                Start-Process -FilePath $bnetExe -WorkingDirectory $serverDir
+            } else {
+                Write-Host "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
+            }
+        }
+        "2" {
+            if (!(Ensure-MySQLRunning)) {
+                Write-Host "[Server] Cannot start WorldServer without MySQL." -ForegroundColor Red
+                break
+            }
+            if (Test-Path $worldExe) {
+                Write-Host "[Server] Starting WorldServer..." -ForegroundColor Green
+                Start-Process -FilePath $worldExe -WorkingDirectory $serverDir
+            } else {
+                Write-Host "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
+            }
+        }
+        "3" {
+            if (!(Ensure-MySQLRunning)) {
+                Write-Host "[Server] Cannot start servers without MySQL." -ForegroundColor Red
+                break
+            }
+            if (Test-Path $bnetExe) {
+                Write-Host "[Server] Starting BnetServer..." -ForegroundColor Green
+                Start-Process -FilePath $bnetExe -WorkingDirectory $serverDir
+            } else {
+                Write-Host "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
+            }
+            if (Test-Path $worldExe) {
+                Write-Host "[Server] Starting WorldServer..." -ForegroundColor Green
+                Start-Process -FilePath $worldExe -WorkingDirectory $serverDir
+            } else {
+                Write-Host "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
+            }
+        }
+        "4" {
+            while ($true) {
+                Write-Host ""
+                Write-Host "Server Operations:" -ForegroundColor Cyan
+                Write-Host "  1. Kill MySQL Process" -ForegroundColor White
+                Write-Host "  2. Back" -ForegroundColor White
+                Write-Host ""
+                $opsChoice = Read-Host "Enter your choice (1/2)"
+
+                switch ($opsChoice) {
+                    "1" {
+                        $mysqlProc = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
+                        if ($mysqlProc) {
+                            Write-Host "[Ops] Stopping MySQL process..." -ForegroundColor Yellow
+                            $mysqlProc | Stop-Process -Force
+                            Write-Host "[Ops] MySQL process stopped." -ForegroundColor Green
+                        } else {
+                            Write-Host "[Ops] MySQL process is not running." -ForegroundColor DarkGray
+                        }
+                    }
+                    "2" {
+                        break
+                    }
+                    default {
+                        Write-Host "[Ops] Invalid choice." -ForegroundColor Red
+                    }
+                }
+                if ($opsChoice -eq "2") { break }
+            }
+        }
+        "5" {
+            Write-Host "[Server] Exiting." -ForegroundColor Yellow
+            exit
+        }
+        default {
+            Write-Host "[Server] Invalid choice." -ForegroundColor Red
+        }
+    }
+}
