@@ -61,21 +61,21 @@ function Write-Config
 {
     param(
         [bool]$FirstTime,
-        [int]$DbSetup = 0,
         [int]$DataSetup = 0,
-        [int]$UpdatesCleaned = 0
+        [int]$GenAISetup = 0,
+        [int]$GenAIEnable = 0
     )
 
     $timestamp = (Get-Date).ToString("o")
     $lines = @()
     $lines += "FirstTimeInstall=1"
     $lines += "LastUpdated=$timestamp"
-    $lines += "MySqlDBSetup=$DbSetup"
     $lines += "ServerDataSetup=$DataSetup"
-    $lines += "UpdatesCleaned=$UpdatesCleaned"
+    $lines += "GenAISetup=$GenAISetup"
+    $lines += "GenAIEnable=$GenAIEnable"
 
     $lines | Out-File -FilePath $configFile -Encoding UTF8 -Force
-    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup, ServerDataSetup=$DataSetup, UpdatesCleaned=$UpdatesCleaned" -ForegroundColor DarkGray
+    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, ServerDataSetup=$DataSetup, GenAISetup=$GenAISetup, GenAIEnable=$GenAIEnable" -ForegroundColor DarkGray
 }
 
 function Download-File
@@ -101,10 +101,29 @@ function Download-File
                    elseif ($size -ge 1KB) { "{0:N2} KB" -f ($size / 1KB) }
                    else { "$size B" }
 
-        Write-Host "  Downloading: $fileName ($sizeStr)..." -NoNewline -ForegroundColor White
+        Write-Host "  Downloading: $fileName ($sizeStr)..." -ForegroundColor White
 
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
-        Write-Host " Done." -ForegroundColor Green
+        $maxRetries = 3
+        $retryCount = 0
+        $downloaded = $false
+        while (!$downloaded -and $retryCount -lt $maxRetries) {
+            $retryCount++
+            if ($retryCount -gt 1) {
+                Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
+            }
+            try {
+                Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 0
+                $downloaded = $true
+            } catch {
+                if ($retryCount -lt $maxRetries) {
+                    Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "  Retrying..." -ForegroundColor DarkYellow
+                } else {
+                    throw
+                }
+            }
+        }
+        Write-Host "  Done." -ForegroundColor Green
         return $true
     }
     catch
@@ -131,6 +150,7 @@ function Parse-Manifest
         "other"  = @{}
         "gdrive" = @{}
         "data"   = @{}
+        "genai"  = @{}
     }
 
     $currentSection = ""
@@ -175,6 +195,7 @@ function Compare-Manifest
         "other"  = @{}
         "gdrive" = @{}
         "data"   = @{}
+        "genai"  = @{}
     }
 
     if (!$LocalSections) {
@@ -375,27 +396,32 @@ function Download-GdriveFile
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
 
-        Write-Host "  Downloading: $fileName from Google Drive..." -NoNewline -ForegroundColor White
+        Write-Host "  Downloading: $fileName from Google Drive..." -ForegroundColor White
 
         $tempFile = [System.IO.Path]::GetTempFileName()
         $session = $null
 
         # Step 1: Initial request to get the confirmation page (large files)
         $initialUrl = "https://drive.google.com/uc?export=download&id=$fileId"
-        Invoke-WebRequest -Uri $initialUrl -OutFile $tempFile -UseBasicParsing -SessionVariable session | Out-Null
+        Invoke-WebRequest -Uri $initialUrl -OutFile $tempFile -UseBasicParsing -SessionVariable session -TimeoutSec 0 | Out-Null
 
-        $rawBytes = [System.IO.File]::ReadAllBytes($tempFile)
-        $content = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+        # Read only first 4KB to check if it's HTML (avoid OOM on large files)
+        $peekBytes = New-Object byte[] 4096
+        $fs = [System.IO.File]::OpenRead($tempFile)
+        $bytesRead = $fs.Read($peekBytes, 0, 4096)
+        $fs.Close()
+        $peekContent = [System.Text.Encoding]::UTF8.GetString($peekBytes, 0, $bytesRead)
 
         # Check if we got the actual file or an HTML confirmation page
-        $isHtml = $content -match '<html' -or $content -match '<!DOCTYPE'
+        $isHtml = $peekContent -match '<html' -or $peekContent -match '<!DOCTYPE'
 
         if ($isHtml) {
-            Write-Host " (confirming)..." -NoNewline -ForegroundColor DarkYellow
+            Write-Host "  (confirming)..." -ForegroundColor DarkYellow
 
-            # Extract uuid from the HTML form
+            # Read full content for uuid extraction (only for small HTML confirmation page)
+            $fullContent = Get-Content $tempFile -Raw -Encoding UTF8
             $uuid = $null
-            if ($content -match 'name="uuid"\s+value="([^"]+)"') {
+            if ($fullContent -match 'name="uuid"\s+value="([^"]+)"') {
                 $uuid = $Matches[1]
             }
 
@@ -405,15 +431,37 @@ function Download-GdriveFile
                 $downloadUrl += "&uuid=$uuid"
             }
 
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing | Out-Null
+            $maxRetries = 3
+            $retryCount = 0
+            $downloaded = $false
+            while (!$downloaded -and $retryCount -lt $maxRetries) {
+                $retryCount++
+                if ($retryCount -gt 1) {
+                    Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
+                }
+                try {
+                    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing -TimeoutSec 0 | Out-Null
+                    $downloaded = $true
+                } catch {
+                    if ($retryCount -lt $maxRetries) {
+                        Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "  Retrying..." -ForegroundColor DarkYellow
+                    } else {
+                        throw
+                    }
+                }
+            }
 
-            # Verify we got the actual file this time
-            $rawBytes = [System.IO.File]::ReadAllBytes($tempFile)
-            $content = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+            # Verify we got the actual file this time (read only first 4KB)
+            $verifyBytes = New-Object byte[] 4096
+            $fs2 = [System.IO.File]::OpenRead($tempFile)
+            $verifyBytesRead = $fs2.Read($verifyBytes, 0, 4096)
+            $fs2.Close()
+            $verifyContent = [System.Text.Encoding]::UTF8.GetString($verifyBytes, 0, $verifyBytesRead)
 
-            if ($content -match '<html' -or $content -match '<!DOCTYPE') {
+            if ($verifyContent -match '<html' -or $verifyContent -match '<!DOCTYPE') {
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-                Write-Host " FAILED!" -ForegroundColor Red
+                Write-Host "  FAILED!" -ForegroundColor Red
                 Write-Host "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
                 return $false
             }
@@ -534,12 +582,14 @@ $sqlTotal = $sections["sql"].Count
 $otherTotal = $sections["other"].Count
 $gdriveTotal = $sections["gdrive"].Count
 $dataTotal = $sections["data"].Count
+$genaiTotal = $sections["genai"].Count
 
 $zipChanged = $changed["zip"].Count
 $sqlChanged = $changed["sql"].Count
 $otherChanged = $changed["other"].Count
 $gdriveChanged = $changed["gdrive"].Count
 $dataChanged = $changed["data"].Count
+$genaiChanged = $changed["genai"].Count
 
 $zipSkipped = $zipTotal - $zipChanged
 $sqlSkipped = $sqlTotal - $sqlChanged
@@ -553,6 +603,7 @@ Write-Host "  SQL files:    $sqlTotal ($sqlChanged changed, $sqlSkipped up-to-da
 Write-Host "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up-to-date)" -ForegroundColor White
 Write-Host "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
 Write-Host "  Data files:   $dataTotal" -ForegroundColor White
+Write-Host "  GenAI files:  $genaiTotal ($genaiChanged changed)" -ForegroundColor White
 
 # Step 5: Download only changed files
 Download-ZipFiles -Files $changed["zip"]
@@ -720,107 +771,80 @@ if ($dataSetupDone) {
     $dataSetupDone = $true
 }
 
-# Step 9: MySQL Startup
-Write-Host ""
-Write-Host ("=" * 80) -ForegroundColor DarkCyan
-Write-Host "Starting MySQL for Database setup." -ForegroundColor Cyan
+# Step 8b: GenAI Server Setup
+$genAISetupDone = $false
+$genAIEnable = 0
 
-$mysqlDir = Join-Path $scriptDir "Dep\mysql"
-$mysqldExe = Join-Path $mysqlDir "bin\mysqld.exe"
-$myIni = Join-Path $mysqlDir "my.ini"
-
-if (Test-Path $mysqldExe) {
-    if (Test-Path $myIni) {
-        Write-Host "[MySQL] Starting mysqld with config: $myIni" -ForegroundColor White
-        Push-Location $mysqlDir
-        Start-Process -FilePath $mysqldExe -ArgumentList "--defaults-file=`"$myIni`"" -NoNewWindow -PassThru | Out-Null
-        Pop-Location
-        Write-Host "[MySQL] mysqld started." -ForegroundColor Green
-    } else {
-        Write-Host "[MySQL] Config file not found: $myIni" -ForegroundColor Red
-        Write-Host "[MySQL] Starting mysqld without config..." -ForegroundColor Yellow
-        Push-Location $mysqlDir
-        Start-Process -FilePath $mysqldExe -NoNewWindow -PassThru | Out-Null
-        Pop-Location
-        Write-Host "[MySQL] mysqld started (no config)." -ForegroundColor Green
-    }
-} else {
-    Write-Host "[MySQL] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
-    Write-Host "[MySQL] Skipping MySQL startup." -ForegroundColor DarkGray
+if ($config -and $config["GenAISetup"] -eq "1") {
+    $genAISetupDone = $true
+    $genAIEnable = if ($config["GenAIEnable"] -eq "1") { 1 } else { 0 }
 }
 
-# Step 10: Database Setup
-$mysqlExe = Join-Path $mysqlDir "bin\mysql.exe"
-$setupSql = Join-Path $scriptDir "Sql\setup\create_mysql.sql"
-$dbSetupDone = $false
-if (!$isFirstTime -and $config["MySqlDBSetup"] -eq "1") {
-    $dbSetupDone = $true
-}
-
-if ($dbSetupDone) {
+if ($genAISetupDone) {
     Write-Host ""
-    Write-Host "[DB] Database already set up (MySqlDBSetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
-} elseif (Test-Path $mysqlExe) {
+    Write-Host "[GenAI] GenAI setup already completed (GenAISetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
+} else {
     Write-Host ""
     Write-Host ("=" * 80) -ForegroundColor DarkCyan
-    Write-Host "Setting up database..." -ForegroundColor Cyan
-    Write-Host "Waiting for MySQL to be ready..." -ForegroundColor White
-
-    $mysqlReady = $false
-    $maxRetries = 60
-    $retryCount = 0
-
-    while (!$mysqlReady -and $retryCount -lt $maxRetries) {
-        $prevEAP = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        try {
-            $result = & $mysqlExe -u root -proot -e "SELECT 1;" 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $mysqlReady = $true
-            } else {
-                $retryCount++
-                if ($retryCount -le 3 -or $retryCount % 10 -eq 0) {
-                    Write-Host "[DB] Waiting... ($retryCount/$maxRetries) $result" -ForegroundColor DarkGray
-                }
-                Start-Sleep -Seconds 1
-            }
-        } catch {
-            $retryCount++
-            if ($retryCount -le 3 -or $retryCount % 10 -eq 0) {
-                Write-Host "[DB] Waiting... ($retryCount/$maxRetries) $($_.Exception.Message)" -ForegroundColor DarkGray
-            }
-            Start-Sleep -Seconds 1
-        }
-        $ErrorActionPreference = $prevEAP
-    }
-
-    if ($mysqlReady) {
-        Write-Host "[DB] MySQL is ready!" -ForegroundColor Green
-
-        if (Test-Path $setupSql) {
-            Write-Host "[DB] Running SQL setup file: $setupSql" -ForegroundColor White
-            $prevEAP = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            Get-Content $setupSql -Raw | & $mysqlExe -u root -proot 2>&1 | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
-            $ErrorActionPreference = $prevEAP
-            Write-Host "[DB] Database setup complete!" -ForegroundColor Green
-            $dbSetupDone = $true
-        } else {
-            Write-Host "[DB] Setup SQL file not found: $setupSql" -ForegroundColor Red
-        }
-    } else {
-        Write-Host "[DB] MySQL did not become ready after $maxRetries seconds." -ForegroundColor Red
-        Write-Host "[DB] Skipping database setup." -ForegroundColor DarkGray
-    }
-} else {
+    Write-Host "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
+    Write-Host "!!! Warning: running a GenAI server on your machine can be quite demanding." -ForegroundColor Yellow
+    Write-Host "!!! Required: An RTX GPU with cuda capabilities." -ForegroundColor Yellow
+    Write-Host "!!! If you do not want to use Llama CPP you can still set up your own GenAI provider, local or cloud." -ForegroundColor Yellow
+    Write-Host "Do you want to install a local Llama CPP GenAI provider on your machine?" -ForegroundColor White
+    Write-Host "This will also enable GenAI functionality for Followship Bots." -ForegroundColor White
+    Write-Host "  1. Yes, I want a local Llama CPP server" -ForegroundColor White
+    Write-Host "  2. No, I do not want or I will set it up myself later." -ForegroundColor White
     Write-Host ""
-    Write-Host "[DB] mysql.exe not found at: $mysqlExe" -ForegroundColor Red
-    Write-Host "[DB] Skipping database setup." -ForegroundColor DarkGray
+    $genaiChoice = Read-Host "Enter your choice (1/2)"
+
+    switch ($genaiChoice)
+    {
+        "1"
+        {
+            Write-Host ""
+            Write-Host "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
+            if ($genaiChanged -eq 0 -and $genaiTotal -gt 0) {
+                Write-Host "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
+            } elseif ($genaiTotal -eq 0) {
+                Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
+            } else {
+                Download-GdriveFiles -Files $changed["genai"]
+                Write-Host "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
+            }
+            $genAIEnable = 1
+
+            # Update GenAI.conf to enable GenAI for Followship Bots
+            $genaiConf = Join-Path $scriptDir "Server\worldserver.conf.d\GenAI.conf"
+            if (Test-Path $genaiConf) {
+                Write-Host "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
+                $confContent = Get-Content $genaiConf -Raw
+                $confContent = $confContent -replace 'Followship\.Bots\.GenAI\.Enabled\s*=\s*0', 'Followship.Bots.GenAI.Enabled = 1'
+                $confContent | Out-File -FilePath $genaiConf -Encoding UTF8 -Force
+                Write-Host "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
+            } else {
+                Write-Host "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
+                Write-Host "[GenAI] You will need to set Followship.Bots.GenAI.Enabled = 1 manually." -ForegroundColor Yellow
+            }
+        }
+        "2"
+        {
+            Write-Host ""
+            Write-Host "[GenAI] You chose not to install a local Llama CPP server." -ForegroundColor Yellow
+            Write-Host "[GenAI] You can set up your own GenAI provider later (local or cloud)." -ForegroundColor Yellow
+            $genAIEnable = 0
+        }
+        default
+        {
+            Write-Host ""
+            Write-Host "[GenAI] Invalid choice. Skipping GenAI setup." -ForegroundColor Red
+            $genAIEnable = 0
+        }
+    }
+    $genAISetupDone = $true
 }
 
-# Update repack.conf with DB setup and data setup status
-$updatesCleanedVal = if ($config -and $config["UpdatesCleaned"] -eq "1") { 1 } else { 0 }
-Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -UpdatesCleaned $updatesCleanedVal
+# Update repack.conf with data setup and GenAI status
+Write-Config -FirstTime $isFirstTime -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -GenAISetup $(if ($genAISetupDone) { 1 } else { 0 }) -GenAIEnable $genAIEnable
 
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
@@ -830,25 +854,9 @@ $serverDir = Join-Path $scriptDir "Server"
 $bnetExe = Join-Path $serverDir "bnetserver.exe"
 $worldExe = Join-Path $serverDir "worldserver.exe"
 
-function Run-UpdatesCleanup
-{
-    $mysqlExeCheck = Join-Path $mysqlDir "bin\mysql.exe"
-    $cleanupSql = Join-Path $scriptDir "sql\Fixes\updates_cleanup.sql"
-
-    if (!(Test-Path $cleanupSql)) {
-        Write-Host "[Updates] Cleanup SQL file not found: $cleanupSql" -ForegroundColor Red
-        return
-    }
-
-    Write-Host "[Updates] Running updates cleanup SQL..." -ForegroundColor Cyan
-
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    Get-Content $cleanupSql -Raw | & $mysqlExeCheck -u root -proot 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
-    $ErrorActionPreference = $prevEAP
-
-    Write-Host "[Updates] Cleanup complete." -ForegroundColor Green
-}
+$mysqlDir = Join-Path $scriptDir "Dep\mysql"
+$mysqldExe = Join-Path $mysqlDir "bin\mysqld.exe"
+$myIni = Join-Path $mysqlDir "my.ini"
 
 function Ensure-MySQLRunning
 {
@@ -904,14 +912,6 @@ function Ensure-MySQLRunning
         }
 
         Write-Host "[MySQL] MySQL is ready!" -ForegroundColor Green
-    }
-
-    # Run updates cleanup once (if not already done per config)
-    $currentConfig = Read-Config
-    if (!$currentConfig -or $currentConfig["UpdatesCleaned"] -ne "1") {
-        Run-UpdatesCleanup
-        Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -UpdatesCleaned 1
-        Write-Host "[Updates] UpdatesCleaned flag set to 1 in repack.conf." -ForegroundColor DarkGray
     }
 
     return $true
