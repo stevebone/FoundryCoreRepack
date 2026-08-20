@@ -4,6 +4,7 @@ serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/
 hotfixesdb=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/HotfixesDB.zip]
 mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
 sqlbase=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/SqlBase.zip]
+bnetserver=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/BnetServer.zip]
 [sql]
 [other]
 [gdrive]
