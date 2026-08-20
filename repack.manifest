@@ -1,13 +1,15 @@
 [zip]
-https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Dep.zip
-https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip
-https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/HotfixesDB.zip
-https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip
+mysql=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Dep.zip]
+serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip]
+hotfixesdb=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/HotfixesDB.zip]
+mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
+sqlbase=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/SqlBase.zip]
 [sql]
 [other]
 [gdrive]
-https://drive.google.com/open?id=1DA1fxJvLeXVamQ0OD7dA6c38YOkllaKm
+worlddb=[08202026-00, https://drive.google.com/open?id=1DA1fxJvLeXVamQ0OD7dA6c38YOkllaKm]
 [data]
-https://drive.google.com/open?id=1MmNiql5oY4tcBjUU67Gb2gDi3MyKXoL2
-https://drive.google.com/open?id=1ACGYUCBKFUMvBX6v2Wuvel6W2a3bwKK0
-https://drive.google.com/open?id=1Kgo6MwhO3bnwITNhqIRhGYtRzr2feR5w
+dbc=[08202026-00, https://drive.google.com/open?id=1MmNiql5oY4tcBjUU67Gb2gDi3MyKXoL2]
+maps=[08202026-00, https://drive.google.com/open?id=1ACGYUCBKFUMvBX6v2Wuvel6W2a3bwKK0]
+vmaps=[08202026-00, https://drive.google.com/open?id=1Kgo6MwhO3bnwITNhqIRhGYtRzr2feR5w]
+mmaps=[08202026-00, https://drive.google.com/open?id=1Bhz04oB3xlhEXAxPvMSILaCqcFIVgjkp]
