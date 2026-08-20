@@ -58,15 +58,19 @@ function Read-Config
 
 function Write-Config
 {
-    param([bool]$FirstTime)
+    param(
+        [bool]$FirstTime,
+        [int]$DbSetup = 0
+    )
 
     $timestamp = (Get-Date).ToString("o")
     $lines = @()
     $lines += "FirstTimeInstall=1"
     $lines += "LastUpdated=$timestamp"
+    $lines += "MySqlDBSetup=$DbSetup"
 
     $lines | Out-File -FilePath $configFile -Encoding UTF8 -Force
-    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp" -ForegroundColor DarkGray
+    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup" -ForegroundColor DarkGray
 }
 
 function Download-File
@@ -499,9 +503,6 @@ Write-Host "  SQL files downloaded:   $sqlCount" -ForegroundColor White
 Write-Host "  Other files downloaded: $otherCount" -ForegroundColor White
 Write-Host ""
 
-# Step 7: Update repack.conf
-Write-Config -FirstTime $isFirstTime
-
 Write-Host ""
 if ($isFirstTime) {
     Write-Host ">> First-time installation complete!" -ForegroundColor Green
@@ -666,6 +667,78 @@ if (Test-Path $mysqldExe) {
     Write-Host "[MySQL] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
     Write-Host "[MySQL] Skipping MySQL startup." -ForegroundColor DarkGray
 }
+
+# Step 10: Database Setup
+$mysqlExe = Join-Path $mysqlDir "bin\mysql.exe"
+$setupSql = Join-Path $scriptDir "Sql\setup\create_mysql.sql"
+$dbSetupDone = $false
+if (!$isFirstTime -and $config["MySqlDBSetup"] -eq "1") {
+    $dbSetupDone = $true
+}
+
+if ($dbSetupDone) {
+    Write-Host ""
+    Write-Host "[DB] Database already set up (MySqlDBSetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
+} elseif (Test-Path $mysqlExe) {
+    Write-Host ""
+    Write-Host ("=" * 80) -ForegroundColor DarkCyan
+    Write-Host "Setting up database..." -ForegroundColor Cyan
+    Write-Host "Waiting for MySQL to be ready..." -ForegroundColor White
+
+    $mysqlReady = $false
+    $maxRetries = 60
+    $retryCount = 0
+
+    while (!$mysqlReady -and $retryCount -lt $maxRetries) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $result = & $mysqlExe -u root -proot -e "SELECT 1;" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $mysqlReady = $true
+            } else {
+                $retryCount++
+                if ($retryCount -le 3 -or $retryCount % 10 -eq 0) {
+                    Write-Host "[DB] Waiting... ($retryCount/$maxRetries) $result" -ForegroundColor DarkGray
+                }
+                Start-Sleep -Seconds 1
+            }
+        } catch {
+            $retryCount++
+            if ($retryCount -le 3 -or $retryCount % 10 -eq 0) {
+                Write-Host "[DB] Waiting... ($retryCount/$maxRetries) $($_.Exception.Message)" -ForegroundColor DarkGray
+            }
+            Start-Sleep -Seconds 1
+        }
+        $ErrorActionPreference = $prevEAP
+    }
+
+    if ($mysqlReady) {
+        Write-Host "[DB] MySQL is ready!" -ForegroundColor Green
+
+        if (Test-Path $setupSql) {
+            Write-Host "[DB] Running SQL setup file: $setupSql" -ForegroundColor White
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            Get-Content $setupSql -Raw | & $mysqlExe -u root -proot 2>&1 | ForEach-Object { Write-Host $_ -ForegroundColor DarkGray }
+            $ErrorActionPreference = $prevEAP
+            Write-Host "[DB] Database setup complete!" -ForegroundColor Green
+            $dbSetupDone = $true
+        } else {
+            Write-Host "[DB] Setup SQL file not found: $setupSql" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "[DB] MySQL did not become ready after $maxRetries seconds." -ForegroundColor Red
+        Write-Host "[DB] Skipping database setup." -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host ""
+    Write-Host "[DB] mysql.exe not found at: $mysqlExe" -ForegroundColor Red
+    Write-Host "[DB] Skipping database setup." -ForegroundColor DarkGray
+}
+
+# Update repack.conf with DB setup status
+Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 })
 
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
