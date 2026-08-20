@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
+$manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
 $sqlRoot = Join-Path $scriptDir "sql"
 
 # ============================================================
@@ -60,7 +61,8 @@ function Write-Config
 {
     param(
         [bool]$FirstTime,
-        [int]$DbSetup = 0
+        [int]$DbSetup = 0,
+        [int]$DataSetup = 0
     )
 
     $timestamp = (Get-Date).ToString("o")
@@ -68,9 +70,10 @@ function Write-Config
     $lines += "FirstTimeInstall=1"
     $lines += "LastUpdated=$timestamp"
     $lines += "MySqlDBSetup=$DbSetup"
+    $lines += "ServerDataSetup=$DataSetup"
 
     $lines | Out-File -FilePath $configFile -Encoding UTF8 -Force
-    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup" -ForegroundColor DarkGray
+    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, MySqlDBSetup=$DbSetup, ServerDataSetup=$DataSetup" -ForegroundColor DarkGray
 }
 
 function Download-File
@@ -121,11 +124,11 @@ function Parse-Manifest
     }
 
     $sections = @{
-        "zip"    = @()
-        "sql"    = @()
-        "other"  = @()
-        "gdrive" = @()
-        "data"   = @()
+        "zip"    = @{}
+        "sql"    = @{}
+        "other"  = @{}
+        "gdrive" = @{}
+        "data"   = @{}
     }
 
     $currentSection = ""
@@ -142,11 +145,61 @@ function Parse-Manifest
         }
 
         if ($currentSection -and $sections.ContainsKey($currentSection)) {
-            $sections[$currentSection] += $line
+            # Parse: identifier=[version, url]
+            if ($line -match '^(\w+)\s*=\s*\[(.+?),\s*(.+)\]$') {
+                $id = $Matches[1].Trim()
+                $version = $Matches[2].Trim()
+                $url = $Matches[3].Trim()
+                $sections[$currentSection][$id] = @{ Version = $version; Url = $url }
+            } else {
+                Write-Host "[Manifest] Warning: Could not parse line: $line" -ForegroundColor DarkYellow
+            }
         }
     }
 
     return $sections
+}
+
+function Compare-Manifest
+{
+    param(
+        $LocalSections,
+        $RemoteSections
+    )
+
+    $changed = @{
+        "zip"    = @{}
+        "sql"    = @{}
+        "other"  = @{}
+        "gdrive" = @{}
+        "data"   = @{}
+    }
+
+    if (!$LocalSections) {
+        Write-Host "[Manifest] No local manifest found - all files will be downloaded." -ForegroundColor DarkYellow
+    }
+
+    foreach ($sectionName in $RemoteSections.Keys) {
+        $remoteFiles = $RemoteSections[$sectionName]
+        $localFiles = if ($LocalSections) { $LocalSections[$sectionName] } else { @{} }
+
+        foreach ($id in $remoteFiles.Keys) {
+            $remoteVer = $remoteFiles[$id].Version
+            $localEntry = $localFiles[$id]
+
+            if (!$localEntry) {
+                Write-Host "[Manifest] $sectionName/${id}: NEW (not in local)" -ForegroundColor DarkYellow
+                $changed[$sectionName][$id] = $remoteFiles[$id]
+            } elseif ($localEntry.Version -ne $remoteVer) {
+                Write-Host "[Manifest] $sectionName/${id}: CHANGED (local='$($localEntry.Version)' remote='$remoteVer')" -ForegroundColor DarkYellow
+                $changed[$sectionName][$id] = $remoteFiles[$id]
+            } else {
+                Write-Host "[Manifest] $sectionName/${id}: up-to-date (v=$remoteVer)" -ForegroundColor DarkGray
+            }
+        }
+    }
+
+    return $changed
 }
 
 function Get-SqlRelativePath
@@ -187,22 +240,24 @@ function Get-SqlRelativePath
 
 function Download-ZipFiles
 {
-    param([string[]]$Urls)
+    param($Files)
 
-    if ($Urls.Count -eq 0)
+    if ($Files.Count -eq 0)
     {
         Write-Host "[ZIP] No zip files to download." -ForegroundColor DarkGray
         return
     }
 
     Write-Host ""
-    Write-Host "[ZIP] Downloading and extracting $($Urls.Count) zip file(s)..." -ForegroundColor Cyan
+    Write-Host "[ZIP] Downloading and extracting $($Files.Count) zip file(s)..." -ForegroundColor Cyan
 
-    foreach ($url in $Urls)
+    foreach ($id in $Files.Keys)
     {
+        $url = $Files[$id].Url
         $fileName = [System.IO.Path]::GetFileName([System.Uri]$url)
         $tempZip = Join-Path $scriptDir $fileName
 
+        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
         if (!(Download-File -Url $url -Destination $tempZip)) {
             continue
         }
@@ -219,7 +274,6 @@ function Download-ZipFiles
             Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
         }
 
-        # Clean up the zip file
         if (Test-Path $tempZip) {
             Remove-Item $tempZip -Force
         }
@@ -228,46 +282,50 @@ function Download-ZipFiles
 
 function Download-SqlFiles
 {
-    param([string[]]$Urls)
+    param($Files)
 
-    if ($Urls.Count -eq 0)
+    if ($Files.Count -eq 0)
     {
         Write-Host "[SQL] No SQL files to download." -ForegroundColor DarkGray
         return
     }
 
     Write-Host ""
-    Write-Host "[SQL] Downloading $($Urls.Count) SQL file(s)..." -ForegroundColor Cyan
+    Write-Host "[SQL] Downloading $($Files.Count) SQL file(s)..." -ForegroundColor Cyan
 
-    foreach ($url in $Urls)
+    foreach ($id in $Files.Keys)
     {
+        $url = $Files[$id].Url
         $relativePath = Get-SqlRelativePath -Url $url
         $destination = Join-Path $scriptDir $relativePath
 
         # Normalize path separators
         $destination = $destination -replace '/', '\'
 
+        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
         Download-File -Url $url -Destination $destination | Out-Null
     }
 }
 
 function Download-OtherFiles
 {
-    param([string[]]$Urls)
+    param($Files)
 
-    if ($Urls.Count -eq 0)
+    if ($Files.Count -eq 0)
     {
         Write-Host "[Other] No other files to download." -ForegroundColor DarkGray
         return
     }
 
     Write-Host ""
-    Write-Host "[Other] Downloading $($Urls.Count) file(s)..." -ForegroundColor Cyan
+    Write-Host "[Other] Downloading $($Files.Count) file(s)..." -ForegroundColor Cyan
 
-    foreach ($url in $Urls)
+    foreach ($id in $Files.Keys)
     {
+        $url = $Files[$id].Url
         $fileName = [System.IO.Path]::GetFileName([System.Uri]$url)
         $destination = Join-Path $scriptDir $fileName
+        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
         Download-File -Url $url -Destination $destination | Out-Null
     }
 }
@@ -378,28 +436,28 @@ function Download-GdriveFile
 
 function Download-GdriveFiles
 {
-    param([string[]]$Urls)
+    param($Files)
 
-    if ($Urls.Count -eq 0)
+    if ($Files.Count -eq 0)
     {
         Write-Host "[GDrive] No Google Drive files to download." -ForegroundColor DarkGray
         return
     }
 
     Write-Host ""
-    Write-Host "[GDrive] Downloading and extracting $($Urls.Count) zip file(s) from Google Drive..." -ForegroundColor Cyan
+    Write-Host "[GDrive] Downloading and extracting $($Files.Count) zip file(s) from Google Drive..." -ForegroundColor Cyan
 
-    foreach ($url in $Urls)
+    foreach ($id in $Files.Keys)
     {
-        $fileId = Get-GdriveFileId -Url $url
-        $fileName = if ($fileId) { "gdrive_$fileId.zip" } else { "gdrive_unknown.zip" }
-        $tempZip = Join-Path $scriptDir $fileName
+        $url = $Files[$id].Url
+        $tempZip = Join-Path $scriptDir "$id.zip"
 
+        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
         if (!(Download-GdriveFile -Url $url -Destination $tempZip)) {
             continue
         }
 
-        Write-Host "  Extracting: $fileName..." -NoNewline -ForegroundColor White
+        Write-Host "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
         try
         {
             Expand-Archive -Path $tempZip -DestinationPath $scriptDir -Force
@@ -411,7 +469,6 @@ function Download-GdriveFiles
             Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
         }
 
-        # Clean up the zip file
         if (Test-Path $tempZip) {
             Remove-Item $tempZip -Force
         }
@@ -444,63 +501,74 @@ else
 
 Write-Host ""
 
-# Step 3: Download manifest
-Write-Host "[Manifest] Downloading repack.manifest..." -ForegroundColor Cyan
-if (!(Download-File -Url $ManifestUrl -Destination $manifestFile))
+# Step 3: Parse local manifest (if exists) before downloading remote
+$localSections = $null
+if (Test-Path $manifestFile) {
+    Write-Host "[Manifest] Found existing local manifest. Parsing for version comparison..." -ForegroundColor DarkGray
+    $localSections = Parse-Manifest -ManifestPath $manifestFile
+}
+
+# Step 3b: Download remote manifest to temp file
+Write-Host "[Manifest] Downloading remote repack.manifest..." -ForegroundColor Cyan
+if (!(Download-File -Url $ManifestUrl -Destination $manifestTempFile))
 {
     Write-Host "[Error] Failed to download manifest. Aborting." -ForegroundColor Red
     exit 1
 }
 
-# Step 4: Parse manifest
-$sections = Parse-Manifest -ManifestPath $manifestFile
+# Step 4: Parse remote manifest
+$sections = Parse-Manifest -ManifestPath $manifestTempFile
 if ($null -eq $sections)
 {
     Write-Host "[Error] Failed to parse manifest. Aborting." -ForegroundColor Red
     exit 1
 }
 
-$zipCount = $sections["zip"].Count
-$sqlCount = $sections["sql"].Count
-$otherCount = $sections["other"].Count
-$gdriveCount = $sections["gdrive"].Count
-$dataCount = $sections["data"].Count
+# Step 4b: Compare local vs remote
+$changed = Compare-Manifest -LocalSections $localSections -RemoteSections $sections
+
+$zipTotal = $sections["zip"].Count
+$sqlTotal = $sections["sql"].Count
+$otherTotal = $sections["other"].Count
+$gdriveTotal = $sections["gdrive"].Count
+$dataTotal = $sections["data"].Count
+
+$zipChanged = $changed["zip"].Count
+$sqlChanged = $changed["sql"].Count
+$otherChanged = $changed["other"].Count
+$gdriveChanged = $changed["gdrive"].Count
+$dataChanged = $changed["data"].Count
+
+$zipSkipped = $zipTotal - $zipChanged
+$sqlSkipped = $sqlTotal - $sqlChanged
+$otherSkipped = $otherTotal - $otherChanged
+$gdriveSkipped = $gdriveTotal - $gdriveChanged
 
 Write-Host ""
 Write-Host "[Manifest] Parsed successfully:" -ForegroundColor Cyan
-Write-Host "  ZIP files:    $zipCount" -ForegroundColor White
-Write-Host "  SQL files:    $sqlCount" -ForegroundColor White
-Write-Host "  Other files:  $otherCount" -ForegroundColor White
-Write-Host "  GDrive files: $gdriveCount" -ForegroundColor White
-Write-Host "  Data files:   $dataCount" -ForegroundColor White
+Write-Host "  ZIP files:    $zipTotal ($zipChanged changed, $zipSkipped up-to-date)" -ForegroundColor White
+Write-Host "  SQL files:    $sqlTotal ($sqlChanged changed, $sqlSkipped up-to-date)" -ForegroundColor White
+Write-Host "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up-to-date)" -ForegroundColor White
+Write-Host "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
+Write-Host "  Data files:   $dataTotal" -ForegroundColor White
 
-# Step 5: Download all silently
-# Skip ZIP and GDrive downloads if this is an update (FirstTimeInstall=1 in existing config)
-$skipZip = $false
-if (!$isFirstTime -and $config["FirstTimeInstall"] -eq "1") {
-    $skipZip = $true
-    Write-Host ""
-    Write-Host "[ZIP] Skipping ZIP downloads (first install already completed)." -ForegroundColor DarkGray
-    Write-Host "[GDrive] Skipping Google Drive downloads (first install already completed)." -ForegroundColor DarkGray
-}
-if (!$skipZip) {
-    Download-ZipFiles -Urls $sections["zip"]
-    Download-GdriveFiles -Urls $sections["gdrive"]
-} else {
-    $zipCount = 0
-    $gdriveCount = 0
-}
-Download-SqlFiles -Urls $sections["sql"]
-Download-OtherFiles -Urls $sections["other"]
+# Step 5: Download only changed files
+Download-ZipFiles -Files $changed["zip"]
+Download-GdriveFiles -Files $changed["gdrive"]
+Download-SqlFiles -Files $changed["sql"]
+Download-OtherFiles -Files $changed["other"]
+
+# Save remote manifest as local for next run's comparison
+Move-Item -Path $manifestTempFile -Destination $manifestFile -Force
 
 # Step 6: Summary
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
 Write-Host "Summary" -ForegroundColor Cyan
-Write-Host "  ZIP files extracted:    $zipCount" -ForegroundColor White
-Write-Host "  GDrive files extracted: $gdriveCount" -ForegroundColor White
-Write-Host "  SQL files downloaded:   $sqlCount" -ForegroundColor White
-Write-Host "  Other files downloaded: $otherCount" -ForegroundColor White
+Write-Host "  ZIP files:    $zipChanged downloaded, $zipSkipped skipped" -ForegroundColor White
+Write-Host "  GDrive files: $gdriveChanged downloaded, $gdriveSkipped skipped" -ForegroundColor White
+Write-Host "  SQL files:    $sqlChanged downloaded, $sqlSkipped skipped" -ForegroundColor White
+Write-Host "  Other files:  $otherChanged downloaded, $otherSkipped skipped" -ForegroundColor White
 Write-Host ""
 
 Write-Host ""
@@ -513,28 +581,37 @@ if ($isFirstTime) {
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
 
 # Step 8: Server Data Setup
-Write-Host ""
-Write-Host "Server Data Setup" -ForegroundColor Cyan
-Write-Host "How do you want to add the Server Data like Maps, Vmaps, MMaps, DB2 etc?" -ForegroundColor Yellow
-Write-Host "  1. Automatic Download" -ForegroundColor White
-Write-Host "  2. Extraction from game client (requires client on this machine)" -ForegroundColor White
-Write-Host "  3. Manual: I will add them myself later in the Data directory." -ForegroundColor White
-Write-Host ""
-$choice = Read-Host "Enter your choice (1/2/3)"
+$dataSetupDone = $false
+if (!$isFirstTime -and $config["ServerDataSetup"] -eq "1") {
+    $dataSetupDone = $true
+}
 
-$dataDir = Join-Path $scriptDir "Data"
-$extractorsDir = Join-Path $scriptDir "Extractors"
+if ($dataSetupDone) {
+    Write-Host ""
+    Write-Host "[Data] Server data already set up (ServerDataSetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
+} else {
+    Write-Host ""
+    Write-Host "Server Data Setup" -ForegroundColor Cyan
+    Write-Host "How do you want to add the Server Data like Maps, Vmaps, MMaps, DB2 etc?" -ForegroundColor Yellow
+    Write-Host "  1. Automatic Download - use this option if your internet is fast or your computer is low end" -ForegroundColor White
+    Write-Host "  2. Extraction from game client (requires client on this machine)" -ForegroundColor White
+    Write-Host "  3. Manual: I will add them myself later in the Data directory." -ForegroundColor White
+    Write-Host ""
+    $choice = Read-Host "Enter your choice (1/2/3)"
 
-switch ($choice)
-{
+    $dataDir = Join-Path $scriptDir "Data"
+    $extractorsDir = Join-Path $scriptDir "Extractors"
+
+    switch ($choice)
+    {
     "1"
     {
         Write-Host ""
         Write-Host "[Data] Downloading data files from Google Drive..." -ForegroundColor Cyan
-        if ($dataCount -eq 0) {
+        if ($dataTotal -eq 0) {
             Write-Host "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
         } else {
-            Download-GdriveFiles -Urls $sections["data"]
+            Download-GdriveFiles -Files $changed["data"]
             Write-Host "[Data] Data files downloaded and extracted." -ForegroundColor Green
         }
     }
@@ -638,6 +715,8 @@ switch ($choice)
         Write-Host "[Data] Invalid choice. Skipping data setup." -ForegroundColor Red
     }
 }
+    $dataSetupDone = $true
+}
 
 # Step 9: MySQL Startup
 Write-Host ""
@@ -737,8 +816,8 @@ if ($dbSetupDone) {
     Write-Host "[DB] Skipping database setup." -ForegroundColor DarkGray
 }
 
-# Update repack.conf with DB setup status
-Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 })
+# Update repack.conf with DB setup and data setup status
+Write-Config -FirstTime $isFirstTime -DbSetup $(if ($dbSetupDone) { 1 } else { 0 }) -DataSetup $(if ($dataSetupDone) { 1 } else { 0 })
 
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
