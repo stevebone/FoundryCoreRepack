@@ -12,11 +12,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "21082026-02"
+$scriptVersion = "21082026-03"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
-$sqlRoot = Join-Path $scriptDir "sql"
 
 # ============================================================
 # Functions
@@ -146,13 +145,14 @@ function Parse-Manifest
     }
 
     $sections = @{
-        "zip"    = @{}
-        "sql"    = @{}
-        "other"  = @{}
-        "gdrive" = @{}
-        "data"   = @{}
-        "genai"  = @{}
-        "script" = @{}
+        "zip"        = @{}
+        "sql"        = @{}
+        "other"      = @{}
+        "gdrive"     = @{}
+        "data"       = @{}
+        "genai"      = @{}
+        "script"     = @{}
+        "datamirror" = @{}
     }
 
     $currentSection = ""
@@ -174,7 +174,16 @@ function Parse-Manifest
                 $id = $Matches[1].Trim()
                 $version = $Matches[2].Trim()
                 $url = $Matches[3].Trim()
-                $sections[$currentSection][$id] = @{ Version = $version; Url = $url }
+                if ($currentSection -eq "datamirror") {
+                    # Collect multiple mirror URLs per id into an array
+                    if ($sections[$currentSection].ContainsKey($id)) {
+                        $sections[$currentSection][$id].Urls += ,$url
+                    } else {
+                        $sections[$currentSection][$id] = @{ Version = $version; Urls = @($url) }
+                    }
+                } else {
+                    $sections[$currentSection][$id] = @{ Version = $version; Url = $url }
+                }
             } else {
                 Write-Host "[Manifest] Warning: Could not parse line: $line" -ForegroundColor DarkYellow
             }
@@ -192,13 +201,14 @@ function Compare-Manifest
     )
 
     $changed = @{
-        "zip"    = @{}
-        "sql"    = @{}
-        "other"  = @{}
-        "gdrive" = @{}
-        "data"   = @{}
-        "genai"  = @{}
-        "script" = @{}
+        "zip"        = @{}
+        "sql"        = @{}
+        "other"      = @{}
+        "gdrive"     = @{}
+        "data"       = @{}
+        "genai"      = @{}
+        "script"     = @{}
+        "datamirror" = @{}
     }
 
     if (!$LocalSections) {
@@ -532,6 +542,73 @@ function Download-GdriveFiles
     }
 }
 
+function Download-DataFiles
+{
+    param(
+        $DataFiles,
+        $MirrorFiles
+    )
+
+    if ($DataFiles.Count -eq 0)
+    {
+        Write-Host "[Data] No data files to download." -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host ""
+    Write-Host "[Data] Downloading and extracting $($DataFiles.Count) data file(s)..." -ForegroundColor Cyan
+
+    foreach ($id in $DataFiles.Keys)
+    {
+        $url = $DataFiles[$id].Url
+        $tempZip = Join-Path $scriptDir "$id.zip"
+        $downloaded = $false
+
+        # Try Google Drive first
+        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        if (Download-GdriveFile -Url $url -Destination $tempZip) {
+            $downloaded = $true
+        } else {
+            # Try mirrors if available
+            $mirrors = $null
+            if ($MirrorFiles -and $MirrorFiles.ContainsKey($id)) {
+                $mirrors = $MirrorFiles[$id].Urls
+            }
+            if ($mirrors -and $mirrors.Count -gt 0) {
+                Write-Host "  [$id] Trying $($mirrors.Count) mirror(s)..." -ForegroundColor DarkYellow
+                foreach ($mirrorUrl in $mirrors) {
+                    Write-Host "  [$id] Mirror: $mirrorUrl" -ForegroundColor DarkGray
+                    if (Download-File -Url $mirrorUrl -Destination $tempZip) {
+                        $downloaded = $true
+                        break
+                    }
+                }
+            }
+        }
+
+        if (!$downloaded) {
+            Write-Host "  [$id] FAILED - no source available." -ForegroundColor Red
+            continue
+        }
+
+        Write-Host "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
+        try
+        {
+            Expand-Archive -Path $tempZip -DestinationPath $scriptDir -Force
+            Write-Host " Done." -ForegroundColor Green
+        }
+        catch
+        {
+            Write-Host " FAILED!" -ForegroundColor Red
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+        }
+
+        if (Test-Path $tempZip) {
+            Remove-Item $tempZip -Force
+        }
+    }
+}
+
 # ============================================================
 # Main
 # ============================================================
@@ -610,6 +687,7 @@ Write-Host "  SQL files:    $sqlTotal ($sqlChanged changed, $sqlSkipped up-to-da
 Write-Host "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up-to-date)" -ForegroundColor White
 Write-Host "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
 Write-Host "  Data files:   $dataTotal" -ForegroundColor White
+Write-Host "  Data mirrors: $($sections['datamirror'].Count)" -ForegroundColor White
 Write-Host "  GenAI files:  $genaiTotal ($genaiChanged changed)" -ForegroundColor White
 
 # Step 4c: Check for script self-update
@@ -699,7 +777,7 @@ if ($dataSetupDone) {
         if ($dataTotal -eq 0) {
             Write-Host "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
         } else {
-            Download-GdriveFiles -Files $sections["data"]
+            Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"]
             Write-Host "[Data] Data files downloaded and extracted." -ForegroundColor Green
         }
     }
@@ -843,7 +921,7 @@ if ($genAISetupDone) {
             } elseif ($genaiTotal -eq 0) {
                 Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
             } else {
-                Download-GdriveFiles -Files $changed["genai"]
+                Download-GdriveFiles -Files $sections["genai"]
                 Write-Host "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
             }
             $genAIEnable = 1

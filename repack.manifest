@@ -1,5 +1,5 @@
 [script]
-FoundryCoreRepack=[21082026-02, https://raw.githubusercontent.com/stevebone/FoundryCoreRepack/refs/heads/main/FoundryCoreRepack.ps1]
+FoundryCoreRepack=[21082026-03, https://raw.githubusercontent.com/stevebone/FoundryCoreRepack/refs/heads/main/FoundryCoreRepack.ps1]
 [zip]
 serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip]
 mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
@@ -17,3 +17,5 @@ vmaps=[08202026-00, https://drive.google.com/open?id=1Kgo6MwhO3bnwITNhqIRhGYtRzr
 mmaps=[08202026-00, https://drive.google.com/open?id=1Bhz04oB3xlhEXAxPvMSILaCqcFIVgjkp]
 [genai]
 llamacpp=[08202026-00, https://drive.google.com/open?id=1QLbUkHUukBnVkEEH6FHB5Ll-jL_Z5BTk]
+[datamirror]
+mmaps=[08202026-00, https://tc.arctium.io/master/12.0.7/mmaps.zip]
