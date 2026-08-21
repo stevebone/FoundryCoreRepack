@@ -611,6 +611,10 @@ function Download-DataFiles
 
 function Setup-GenAI
 {
+    param(
+        [switch]$Force
+    )
+
     Write-Host ""
     Write-Host ("=" * 80) -ForegroundColor DarkCyan
     Write-Host "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
@@ -632,7 +636,7 @@ function Setup-GenAI
         {
             Write-Host ""
             Write-Host "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
-            if ($genaiChanged -eq 0 -and $genaiTotal -gt 0) {
+            if (!$Force -and $genaiChanged -eq 0 -and $genaiTotal -gt 0) {
                 Write-Host "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
             } elseif ($genaiTotal -eq 0) {
                 Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
@@ -1093,7 +1097,7 @@ while ($true) {
             if (!(Test-Path $llamaServer)) {
                 Write-Host "[GenAI] llama-server.exe not found at: $llamaServer" -ForegroundColor Red
                 Write-Host "[GenAI] You need to download the GenAI server files first." -ForegroundColor Yellow
-                $genAIEnable = Setup-GenAI
+                $genAIEnable = Setup-GenAI -Force
             } else {
                 Write-Host "[GenAI] Starting Llama CPP Server (CUDA)..." -ForegroundColor Green
                 $genaiCudaDir = Join-Path $scriptDir "GenerativeAI\cuda"
