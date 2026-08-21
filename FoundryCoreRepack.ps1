@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "21082026-03"
+$scriptVersion = "21082026-04"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -1089,9 +1089,10 @@ while ($true) {
                 Write-Host ""
                 Write-Host "Server Operations:" -ForegroundColor Cyan
                 Write-Host "  1. Kill MySQL Process" -ForegroundColor White
-                Write-Host "  2. Back" -ForegroundColor White
+                Write-Host "  2. Start MySQL Server" -ForegroundColor White
+                Write-Host "  3. Back" -ForegroundColor White
                 Write-Host ""
-                $opsChoice = Read-Host "Enter your choice (1/2)"
+                $opsChoice = Read-Host "Enter your choice (1/2/3)"
 
                 switch ($opsChoice) {
                     "1" {
@@ -1105,13 +1106,30 @@ while ($true) {
                         }
                     }
                     "2" {
+                        if (!(Test-Path $mysqldExe)) {
+                            Write-Host "[Ops] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
+                        } else {
+                            Write-Host "[Ops] Starting MySQL..." -ForegroundColor Yellow
+                            if (Test-Path $myIni) {
+                                Push-Location $mysqlDir
+                                Start-Process -FilePath $mysqldExe -ArgumentList "--defaults-file=`"$myIni`"" -NoNewWindow -PassThru | Out-Null
+                                Pop-Location
+                            } else {
+                                Push-Location $mysqlDir
+                                Start-Process -FilePath $mysqldExe -NoNewWindow -PassThru | Out-Null
+                                Pop-Location
+                            }
+                            Write-Host "[Ops] MySQL started." -ForegroundColor Green
+                        }
+                    }
+                    "3" {
                         break
                     }
                     default {
                         Write-Host "[Ops] Invalid choice." -ForegroundColor Red
                     }
                 }
-                if ($opsChoice -eq "2") { break }
+                if ($opsChoice -eq "3") { break }
             }
         }
         "5" {
