@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "21082026-00"
+$scriptVersion = "21082026-01"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -421,8 +421,12 @@ function Download-GdriveFile
         if ($isHtml) {
             Write-Host "  (confirming)..." -ForegroundColor DarkYellow
 
-            # Read full content for uuid extraction (only for small HTML confirmation page)
-            $fullContent = Get-Content $tempFile -Raw -Encoding UTF8
+            # Read first 64KB for uuid extraction (stream-based to avoid 2GB .NET limit)
+            $uuidBytes = New-Object byte[] 65536
+            $fsUuid = [System.IO.File]::OpenRead($tempFile)
+            $uuidBytesRead = $fsUuid.Read($uuidBytes, 0, 65536)
+            $fsUuid.Close()
+            $fullContent = [System.Text.Encoding]::UTF8.GetString($uuidBytes, 0, $uuidBytesRead)
             $uuid = $null
             if ($fullContent -match 'name="uuid"\s+value="([^"]+)"') {
                 $uuid = $Matches[1]
