@@ -652,7 +652,7 @@ function Setup-GenAI
                 Write-Host "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
                 $confContent = Get-Content $genaiConf -Raw
                 $confContent = $confContent -replace 'Followship\.Bots\.GenAI\.Enabled\s*=\s*0', 'Followship.Bots.GenAI.Enabled = 1'
-                $confContent | Out-File -FilePath $genaiConf -Encoding UTF8 -Force
+                [System.IO.File]::WriteAllText($genaiConf, $confContent, (New-Object System.Text.UTF8Encoding $false))
                 Write-Host "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
             } else {
                 Write-Host "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
