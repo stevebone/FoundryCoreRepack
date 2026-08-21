@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "21082026-01"
+$scriptVersion = "21082026-02"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -699,7 +699,7 @@ if ($dataSetupDone) {
         if ($dataTotal -eq 0) {
             Write-Host "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
         } else {
-            Download-GdriveFiles -Files $changed["data"]
+            Download-GdriveFiles -Files $sections["data"]
             Write-Host "[Data] Data files downloaded and extracted." -ForegroundColor Green
         }
     }
