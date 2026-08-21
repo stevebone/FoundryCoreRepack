@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "21082026-04"
+$scriptVersion = "21082026-05"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -609,6 +609,73 @@ function Download-DataFiles
     }
 }
 
+function Setup-GenAI
+{
+    Write-Host ""
+    Write-Host ("=" * 80) -ForegroundColor DarkCyan
+    Write-Host "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
+    Write-Host "!!! Warning: running a GenAI server on your machine can be quite demanding." -ForegroundColor Yellow
+    Write-Host "!!! Required: An RTX GPU with cuda capabilities." -ForegroundColor Yellow
+    Write-Host "!!! If you do not want to use Llama CPP you can still set up your own GenAI provider, local or cloud." -ForegroundColor Yellow
+    Write-Host "Do you want to install a local Llama CPP GenAI provider on your machine?" -ForegroundColor White
+    Write-Host "This will also enable GenAI functionality for Followship Bots." -ForegroundColor White
+    Write-Host "  1. Yes, I want a local Llama CPP server" -ForegroundColor White
+    Write-Host "  2. No, I do not want or I will set it up myself later." -ForegroundColor White
+    Write-Host ""
+    $genaiChoice = Read-Host "Enter your choice (1/2)"
+
+    $genAIEnable = 0
+
+    switch ($genaiChoice)
+    {
+        "1"
+        {
+            Write-Host ""
+            Write-Host "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
+            if ($genaiChanged -eq 0 -and $genaiTotal -gt 0) {
+                Write-Host "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
+            } elseif ($genaiTotal -eq 0) {
+                Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
+            } else {
+                Download-GdriveFiles -Files $sections["genai"]
+                Write-Host "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
+            }
+            $genAIEnable = 1
+
+            # Update GenAI.conf to enable GenAI for Followship Bots
+            $genaiConf = Join-Path $scriptDir "Server\worldserver.conf.d\GenAI.conf"
+            if (Test-Path $genaiConf) {
+                Write-Host "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
+                $confContent = Get-Content $genaiConf -Raw
+                $confContent = $confContent -replace 'Followship\.Bots\.GenAI\.Enabled\s*=\s*0', 'Followship.Bots.GenAI.Enabled = 1'
+                $confContent | Out-File -FilePath $genaiConf -Encoding UTF8 -Force
+                Write-Host "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
+            } else {
+                Write-Host "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
+                Write-Host "[GenAI] You will need to set Followship.Bots.GenAI.Enabled = 1 manually." -ForegroundColor Yellow
+            }
+        }
+        "2"
+        {
+            Write-Host ""
+            Write-Host "[GenAI] You chose not to install a local Llama CPP server." -ForegroundColor Yellow
+            Write-Host "[GenAI] You can set up your own GenAI provider later (local or cloud)." -ForegroundColor Yellow
+            $genAIEnable = 0
+        }
+        default
+        {
+            Write-Host ""
+            Write-Host "[GenAI] Invalid choice. Skipping GenAI setup." -ForegroundColor Red
+            $genAIEnable = 0
+        }
+    }
+
+    # Update repack.conf with GenAI status
+    Write-Config -FirstTime $isFirstTime -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -GenAISetup 1 -GenAIEnable $genAIEnable
+
+    return $genAIEnable
+}
+
 # ============================================================
 # Main
 # ============================================================
@@ -885,79 +952,15 @@ if ($dataSetupDone) {
 }
 
 # Step 8b: GenAI Server Setup
-$genAISetupDone = $false
 $genAIEnable = 0
 
 if ($config -and $config["GenAISetup"] -eq "1") {
-    $genAISetupDone = $true
     $genAIEnable = if ($config["GenAIEnable"] -eq "1") { 1 } else { 0 }
-}
-
-if ($genAISetupDone) {
     Write-Host ""
     Write-Host "[GenAI] GenAI setup already completed (GenAISetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
 } else {
-    Write-Host ""
-    Write-Host ("=" * 80) -ForegroundColor DarkCyan
-    Write-Host "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
-    Write-Host "!!! Warning: running a GenAI server on your machine can be quite demanding." -ForegroundColor Yellow
-    Write-Host "!!! Required: An RTX GPU with cuda capabilities." -ForegroundColor Yellow
-    Write-Host "!!! If you do not want to use Llama CPP you can still set up your own GenAI provider, local or cloud." -ForegroundColor Yellow
-    Write-Host "Do you want to install a local Llama CPP GenAI provider on your machine?" -ForegroundColor White
-    Write-Host "This will also enable GenAI functionality for Followship Bots." -ForegroundColor White
-    Write-Host "  1. Yes, I want a local Llama CPP server" -ForegroundColor White
-    Write-Host "  2. No, I do not want or I will set it up myself later." -ForegroundColor White
-    Write-Host ""
-    $genaiChoice = Read-Host "Enter your choice (1/2)"
-
-    switch ($genaiChoice)
-    {
-        "1"
-        {
-            Write-Host ""
-            Write-Host "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
-            if ($genaiChanged -eq 0 -and $genaiTotal -gt 0) {
-                Write-Host "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
-            } elseif ($genaiTotal -eq 0) {
-                Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
-            } else {
-                Download-GdriveFiles -Files $sections["genai"]
-                Write-Host "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
-            }
-            $genAIEnable = 1
-
-            # Update GenAI.conf to enable GenAI for Followship Bots
-            $genaiConf = Join-Path $scriptDir "Server\worldserver.conf.d\GenAI.conf"
-            if (Test-Path $genaiConf) {
-                Write-Host "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
-                $confContent = Get-Content $genaiConf -Raw
-                $confContent = $confContent -replace 'Followship\.Bots\.GenAI\.Enabled\s*=\s*0', 'Followship.Bots.GenAI.Enabled = 1'
-                $confContent | Out-File -FilePath $genaiConf -Encoding UTF8 -Force
-                Write-Host "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
-            } else {
-                Write-Host "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
-                Write-Host "[GenAI] You will need to set Followship.Bots.GenAI.Enabled = 1 manually." -ForegroundColor Yellow
-            }
-        }
-        "2"
-        {
-            Write-Host ""
-            Write-Host "[GenAI] You chose not to install a local Llama CPP server." -ForegroundColor Yellow
-            Write-Host "[GenAI] You can set up your own GenAI provider later (local or cloud)." -ForegroundColor Yellow
-            $genAIEnable = 0
-        }
-        default
-        {
-            Write-Host ""
-            Write-Host "[GenAI] Invalid choice. Skipping GenAI setup." -ForegroundColor Red
-            $genAIEnable = 0
-        }
-    }
-    $genAISetupDone = $true
+    $genAIEnable = Setup-GenAI
 }
-
-# Update repack.conf with data setup and GenAI status
-Write-Config -FirstTime $isFirstTime -DataSetup $(if ($dataSetupDone) { 1 } else { 0 }) -GenAISetup $(if ($genAISetupDone) { 1 } else { 0 }) -GenAIEnable $genAIEnable
 
 Write-Host ""
 Write-Host ("=" * 80) -ForegroundColor DarkCyan
@@ -1036,10 +1039,11 @@ while ($true) {
     Write-Host "  1. Start BnetServer" -ForegroundColor White
     Write-Host "  2. Start WorldServer" -ForegroundColor White
     Write-Host "  3. Start Both Servers" -ForegroundColor White
-    Write-Host "  4. Server Operations" -ForegroundColor White
-    Write-Host "  5. Exit" -ForegroundColor White
+    Write-Host "  4. Start Llama CPP Server" -ForegroundColor White
+    Write-Host "  5. Server Operations" -ForegroundColor White
+    Write-Host "  6. Exit" -ForegroundColor White
     Write-Host ""
-    $mainChoice = Read-Host "Enter your choice (1/2/3/4/5)"
+    $mainChoice = Read-Host "Enter your choice (1/2/3/4/5/6)"
 
     switch ($mainChoice) {
         "1" {
@@ -1085,6 +1089,20 @@ while ($true) {
             }
         }
         "4" {
+            $llamaServer = Join-Path $scriptDir "GenerativeAI\cuda\llama-server.exe"
+            if (!(Test-Path $llamaServer)) {
+                Write-Host "[GenAI] llama-server.exe not found at: $llamaServer" -ForegroundColor Red
+                Write-Host "[GenAI] You need to download the GenAI server files first." -ForegroundColor Yellow
+                $genAIEnable = Setup-GenAI
+            } else {
+                Write-Host "[GenAI] Starting Llama CPP Server (CUDA)..." -ForegroundColor Green
+                $genaiCudaDir = Join-Path $scriptDir "GenerativeAI\cuda"
+                $genaiArgs = '-m ..\models\Qwen3-4B-Q4_K_M.gguf --chat-template-file ..\models\templates\Qwen3.5-4B.jinja --reasoning off --ctx-size 8192 --gpu-layers 60 --parallel 1 --no-warmup'
+                Start-Process -FilePath $llamaServer -ArgumentList $genaiArgs -WorkingDirectory $genaiCudaDir
+                Write-Host "[GenAI] Llama CPP Server started in new window." -ForegroundColor Green
+            }
+        }
+        "5" {
             while ($true) {
                 Write-Host ""
                 Write-Host "Server Operations:" -ForegroundColor Cyan
@@ -1132,7 +1150,7 @@ while ($true) {
                 if ($opsChoice -eq "3") { break }
             }
         }
-        "5" {
+        "6" {
             Write-Host "[Server] Exiting." -ForegroundColor Yellow
             exit
         }
