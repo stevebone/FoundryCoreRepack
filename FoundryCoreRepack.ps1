@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "22082026-07"
+$scriptVersion = "22082026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
