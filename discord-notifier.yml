@@ -19,7 +19,7 @@ name: Checkout Repository
       
 name: Send Commit or Release Notification to Discord
       env:
-        WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        WEBHOOK_URL: ${{ secrets.FoundryCoreDiscord }}
       run: |
         if [ "${{ github.event_name }}" = "release" ]; then# Format message for official releases/patches
           MESSAGE="🚀 New Release Published: ${{ github.event.release.name }}\nCheck it out here: ${{ github.event.release.html_url }}"
