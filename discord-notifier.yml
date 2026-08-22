@@ -1,0 +1,33 @@
+name: Discord Release & Commit Notifier
+
+on:
+  push:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      
+name: Checkout Repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 2
+
+      
+name: Send Commit or Release Notification to Discord
+      env:
+        WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then# Format message for official releases/patches
+          MESSAGE="🚀 New Release Published: ${{ github.event.release.name }}\nCheck it out here: ${{ github.event.release.html_url }}"
+        else# Format message for standard pushes/commits showing what changed
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
+          AUTHOR=$(git log -1 --pretty=format:"%an")
+          COMMIT_URL="${{ github.event.repository.html_url }}/commit/${{ github.sha }}"
+          MESSAGE="📦 New Update Pushed to FoundryCoreRepack\n> Change: [$COMMIT_MSG]($COMMIT_URL)\n> Author: $AUTHOR"}
+
+          # Send formatted JSON payload to Discord via curl
+          jq -n --arg content "$MESSAGE" '{content: $content}' | curl -X POST -H "Content-Type: application/json" -d @- $WEBHOOK_URL
