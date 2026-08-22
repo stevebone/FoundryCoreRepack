@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "22082026-01"
+$scriptVersion = "22082026-02"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -517,7 +517,18 @@ function Download-ParallelChunks
 
         if (!$failed) {
             $copyTaskArray = [System.Threading.Tasks.Task[]]@($copyTasks)
-            [System.Threading.Tasks.Task]::WaitAll($copyTaskArray)
+            # Poll for progress instead of blocking WaitAll
+            while (!([System.Threading.Tasks.Task]::WaitAll($copyTaskArray, 1000))) {
+                $downloadedBytes = 0
+                foreach ($cf in $chunkFiles) {
+                    if (Test-Path $cf) {
+                        $downloadedBytes += (Get-Item $cf).Length
+                    }
+                }
+                $pct = [math]::Round(($downloadedBytes / $totalSize) * 100, 1)
+                Write-Host ("`r  {0}% ({1:N1} MB / {2:N1} MB)   " -f $pct, ($downloadedBytes / 1MB), ($totalSize / 1MB)) -NoNewline
+            }
+            Write-Host ""
         }
 
         # Cleanup streams and clients

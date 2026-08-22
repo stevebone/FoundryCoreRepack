@@ -1,5 +1,5 @@
 [script]
-FoundryCoreRepack=[22082026-01, https://raw.githubusercontent.com/stevebone/FoundryCoreRepack/refs/heads/main/FoundryCoreRepack.ps1]
+FoundryCoreRepack=[22082026-02, https://raw.githubusercontent.com/stevebone/FoundryCoreRepack/refs/heads/main/FoundryCoreRepack.ps1]
 [zip]
 serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip]
 mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
