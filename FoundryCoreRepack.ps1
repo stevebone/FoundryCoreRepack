@@ -387,131 +387,6 @@ function Get-GdriveFileId
     return $null
 }
 
-function Download-ParallelChunks
-{
-    param(
-        [string]$Url,
-        [string]$Destination,
-        $WebSession = $null,
-        [int]$NumChunks = 4
-    )
-
-    # Extract cookies from WebSession if available
-    $cookieContainer = New-Object System.Net.CookieContainer
-    if ($WebSession -and $WebSession.Cookies) {
-        $cookieContainer = $WebSession.Cookies
-    }
-
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.CookieContainer = $cookieContainer
-    $handler.AllowAutoRedirect = $true
-    $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
-
-    try {
-        # HEAD request to get Content-Length and check range support
-        $headReq = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Head, $Url)
-        $headResp = $client.SendAsync($headReq).Result
-        $headResp.EnsureSuccessStatusCode() | Out-Null
-
-        $totalSize = $headResp.Content.Headers.ContentLength
-        $acceptRanges = $headResp.Headers.AcceptRanges -contains 'bytes'
-        $headResp.Dispose()
-
-        # Fall back to single-stream if no range support or file too small
-        if (!$acceptRanges -or !$totalSize -or $totalSize -lt 10MB) {
-            Write-Host "  (single-stream)" -ForegroundColor DarkGray
-            $resp = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
-            $resp.EnsureSuccessStatusCode() | Out-Null
-            $stream = $resp.Content.ReadAsStreamAsync().Result
-            $fileStream = [System.IO.File]::Create($Destination)
-            $stream.CopyTo($fileStream)
-            $fileStream.Close()
-            $resp.Dispose()
-            return $true
-        }
-
-        Write-Host "  (parallel: $NumChunks chunks, $([math]::Round($totalSize / 1MB, 1)) MB)" -ForegroundColor DarkGray
-
-        $chunkSize = [math]::Floor($totalSize / $NumChunks)
-        $tempDir = [System.IO.Path]::GetDirectoryName($Destination)
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Destination)
-        $chunkFiles = @()
-
-        # Create runspace pool for parallel downloads
-        $runspacePool = [RunspaceFactory]::CreateRunspacePool(1, $NumChunks)
-        $runspacePool.Open()
-        $jobs = @()
-
-        for ($i = 0; $i -lt $NumChunks; $i++) {
-            $start = $i * $chunkSize
-            $end = if ($i -eq $NumChunks - 1) { $totalSize - 1 } else { ($start + $chunkSize - 1) }
-            $chunkFile = Join-Path $tempDir "${baseName}_chunk_${i}.tmp"
-            $chunkFiles += $chunkFile
-
-            $scriptBlock = {
-                param($Url, $Start, $End, $ChunkFile, $CookieContainer)
-                $h = New-Object System.Net.Http.HttpClientHandler
-                $h.CookieContainer = $CookieContainer
-                $h.AllowAutoRedirect = $true
-                $c = New-Object System.Net.Http.HttpClient($h)
-                $c.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
-                $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $Url)
-                $req.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue($Start, $End)
-                $resp = $c.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
-                $resp.EnsureSuccessStatusCode() | Out-Null
-                $stream = $resp.Content.ReadAsStreamAsync().Result
-                $fs = [System.IO.File]::Create($ChunkFile)
-                $stream.CopyTo($fs)
-                $fs.Close()
-                $resp.Dispose()
-                $c.Dispose()
-                $h.Dispose()
-            }
-
-            $ps = [PowerShell]::Create()
-            $ps.RunspacePool = $runspacePool
-            $null = $ps.AddScript($scriptBlock).AddArgument($Url).AddArgument($start).AddArgument($end).AddArgument($chunkFile).AddArgument($cookieContainer)
-            $jobs += [PSCustomObject]@{ Pipe = $ps; Status = $ps.BeginInvoke() }
-        }
-
-        # Wait for all chunks
-        $failed = $false
-        foreach ($job in $jobs) {
-            $job.Pipe.EndInvoke($job.Status)
-            if ($job.Pipe.HadErrors) { $failed = $true }
-            $job.Pipe.Dispose()
-        }
-        $runspacePool.Close()
-        $runspacePool.Dispose()
-
-        if ($failed) {
-            foreach ($cf in $chunkFiles) { Remove-Item $cf -Force -ErrorAction SilentlyContinue }
-            return $false
-        }
-
-        # Combine chunks into final file
-        $outStream = [System.IO.File]::Create($Destination)
-        foreach ($cf in $chunkFiles) {
-            $chunkStream = [System.IO.File]::OpenRead($cf)
-            $chunkStream.CopyTo($outStream)
-            $chunkStream.Close()
-            Remove-Item $cf -Force -ErrorAction SilentlyContinue
-        }
-        $outStream.Close()
-
-        return $true
-    }
-    catch {
-        Write-Host "  Parallel download error: $($_.Exception.Message)" -ForegroundColor Red
-        return $false
-    }
-    finally {
-        $client.Dispose()
-        $handler.Dispose()
-    }
-}
-
 function Download-GdriveFile
 {
     param(
@@ -572,6 +447,7 @@ function Download-GdriveFile
             if ($uuid) {
                 $downloadUrl += "&uuid=$uuid"
             }
+            Write-Host "  (debug: uuid='$uuid', url=$downloadUrl)" -ForegroundColor DarkGray
 
             $maxRetries = 3
             $retryCount = 0
@@ -582,11 +458,8 @@ function Download-GdriveFile
                     Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
                 }
                 try {
-                    if (Download-ParallelChunks -Url $downloadUrl -Destination $tempFile -WebSession $session) {
-                        $downloaded = $true
-                    } else {
-                        throw "Parallel download failed"
-                    }
+		    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing -TimeoutSec 0 | Out-Null
+                    $downloaded = $true
                 } catch {
                     if ($retryCount -lt $maxRetries) {
                         Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
@@ -605,6 +478,7 @@ function Download-GdriveFile
             $verifyContent = [System.Text.Encoding]::UTF8.GetString($verifyBytes, 0, $verifyBytesRead)
 
             if ($verifyContent -match '<html' -or $verifyContent -match '<!DOCTYPE') {
+                Write-Host "  (debug: got HTML, first 200 chars: $($verifyContent.Substring(0, [math]::Min(200, $verifyContent.Length))))" -ForegroundColor DarkGray
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
                 Write-Host "  FAILED!" -ForegroundColor Red
                 Write-Host "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
