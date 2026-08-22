@@ -11,8 +11,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "22082026-00"
+$scriptVersion = "22082026-01"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -145,14 +146,14 @@ function Parse-Manifest
     }
 
     $sections = @{
-        "zip"        = @{}
-        "sql"        = @{}
-        "other"      = @{}
-        "gdrive"     = @{}
-        "data"       = @{}
-        "genai"      = @{}
-        "script"     = @{}
-        "datamirror" = @{}
+        "zip"        = [ordered]@{}
+        "sql"        = [ordered]@{}
+        "other"      = [ordered]@{}
+        "gdrive"     = [ordered]@{}
+        "data"       = [ordered]@{}
+        "genai"      = [ordered]@{}
+        "script"     = [ordered]@{}
+        "datamirror" = [ordered]@{}
     }
 
     $currentSection = ""
@@ -176,10 +177,10 @@ function Parse-Manifest
                 $url = $Matches[3].Trim()
                 if ($currentSection -eq "datamirror") {
                     # Collect multiple mirror URLs per id into an array
-                    if ($sections[$currentSection].ContainsKey($id)) {
+                    if ($sections[$currentSection].Contains($id)) {
                         $sections[$currentSection][$id].Urls += ,$url
                     } else {
-                        $sections[$currentSection][$id] = @{ Version = $version; Urls = @($url) }
+                        $sections[$currentSection][$id] = [ordered]@{ Version = $version; Urls = @($url) }
                     }
                 } else {
                     $sections[$currentSection][$id] = @{ Version = $version; Url = $url }
@@ -387,6 +388,177 @@ function Get-GdriveFileId
     return $null
 }
 
+function Download-ParallelChunks
+{
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [string]$CookieHeader = "",
+        [int]$NumChunks = 4
+    )
+
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $true
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
+
+    try {
+        # Probe with GET Range: bytes=0-0 to check range support and get total size
+        $probeReq = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $Url)
+        $probeReq.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue(0, 0)
+        if ($CookieHeader) {
+            $probeReq.Headers.Add("Cookie", $CookieHeader)
+        }
+        $probeResp = $client.SendAsync($probeReq, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).Result
+        $probeResp.EnsureSuccessStatusCode() | Out-Null
+
+        $statusCode = [int]$probeResp.StatusCode
+        $acceptRanges = $probeResp.Headers.AcceptRanges -contains 'bytes'
+
+        $contentRange = $null
+        if ($probeResp.Content.Headers.ContentRange) {
+            $contentRange = $probeResp.Content.Headers.ContentRange
+        }
+        $probeResp.Dispose()
+
+        $rangeSupported = ($statusCode -eq 206) -and $acceptRanges
+
+        if (!$rangeSupported -or !$contentRange -or !$contentRange.Length) {
+            return $false
+        }
+
+        $totalSize = $contentRange.Length
+
+        if ($totalSize -lt 10MB) {
+            return $false
+        }
+
+        Write-Host "  (parallel: $NumChunks chunks, $([math]::Round($totalSize / 1MB, 1)) MB)" -ForegroundColor DarkGray
+
+        $chunkSize = [math]::Floor($totalSize / $NumChunks)
+        $tempDir = [System.IO.Path]::GetDirectoryName($Destination)
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Destination)
+        $chunkFiles = @()
+        $chunkClients = @()
+        $chunkHandlers = @()
+
+        # Phase 1: Start all header requests
+        $headerTasks = @()
+        for ($i = 0; $i -lt $NumChunks; $i++) {
+            $start = $i * $chunkSize
+            $end = if ($i -eq $NumChunks - 1) { $totalSize - 1 } else { ($start + $chunkSize - 1) }
+            $chunkFile = Join-Path $tempDir "${baseName}_chunk_${i}.tmp"
+            $chunkFiles += $chunkFile
+
+            $chunkHandler = New-Object System.Net.Http.HttpClientHandler
+            $chunkHandler.AllowAutoRedirect = $true
+            $chunkClient = New-Object System.Net.Http.HttpClient($chunkHandler)
+            $chunkClient.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
+            $chunkClients += $chunkClient
+            $chunkHandlers += $chunkHandler
+
+            $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $Url)
+            $req.Headers.Range = New-Object System.Net.Http.Headers.RangeHeaderValue($start, $end)
+            if ($CookieHeader) {
+                $req.Headers.Add("Cookie", $CookieHeader)
+            }
+
+            $headerTasks += $chunkClient.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead)
+        }
+
+        # Wait for all headers to arrive
+        $headerTaskArray = [System.Threading.Tasks.Task[]]@($headerTasks)
+        [System.Threading.Tasks.Task]::WaitAll($headerTaskArray)
+
+        # Verify all chunks got 206 Partial Content
+        $allPartial = $true
+        for ($i = 0; $i -lt $NumChunks; $i++) {
+            try {
+                $resp = $headerTasks[$i].Result
+                if ([int]$resp.StatusCode -ne 206) {
+                    $allPartial = $false
+                    break
+                }
+            } catch {
+                $allPartial = $false
+                break
+            }
+        }
+
+        if (!$allPartial) {
+            for ($i = 0; $i -lt $chunkClients.Count; $i++) {
+                try { $headerTasks[$i].Result.Dispose() } catch {}
+                $chunkClients[$i].Dispose()
+                $chunkHandlers[$i].Dispose()
+            }
+            foreach ($cf in $chunkFiles) { Remove-Item $cf -Force -ErrorAction SilentlyContinue }
+            return $false
+        }
+
+        # Phase 2: Start all stream copies in parallel
+        $failed = $false
+        $copyTasks = @()
+        $streams = @()
+        $fileStreams = @()
+        for ($i = 0; $i -lt $NumChunks; $i++) {
+            try {
+                $resp = $headerTasks[$i].Result
+                $resp.EnsureSuccessStatusCode() | Out-Null
+                $stream = $resp.Content.ReadAsStreamAsync().Result
+                $streams += $stream
+                $fs = [System.IO.File]::Create($chunkFiles[$i])
+                $fileStreams += $fs
+                $copyTasks += $stream.CopyToAsync($fs)
+            } catch {
+                $failed = $true
+                Write-Host "  Chunk $i failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+        if (!$failed) {
+            $copyTaskArray = [System.Threading.Tasks.Task[]]@($copyTasks)
+            [System.Threading.Tasks.Task]::WaitAll($copyTaskArray)
+        }
+
+        # Cleanup streams and clients
+        for ($i = 0; $i -lt $streams.Count; $i++) {
+            if ($streams[$i]) { $streams[$i].Close() }
+        }
+        for ($i = 0; $i -lt $fileStreams.Count; $i++) {
+            if ($fileStreams[$i]) { $fileStreams[$i].Close() }
+        }
+        for ($i = 0; $i -lt $chunkClients.Count; $i++) {
+            $chunkClients[$i].Dispose()
+            $chunkHandlers[$i].Dispose()
+        }
+
+        if ($failed) {
+            foreach ($cf in $chunkFiles) { Remove-Item $cf -Force -ErrorAction SilentlyContinue }
+            return $false
+        }
+
+        # Combine chunks into final file
+        $outStream = [System.IO.File]::Create($Destination)
+        foreach ($cf in $chunkFiles) {
+            $chunkStream = [System.IO.File]::OpenRead($cf)
+            $chunkStream.CopyTo($outStream)
+            $chunkStream.Close()
+            Remove-Item $cf -Force -ErrorAction SilentlyContinue
+        }
+        $outStream.Close()
+
+        return $true
+    }
+    catch {
+        Write-Host "  Parallel download error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+    finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+}
+
 function Download-GdriveFile
 {
     param(
@@ -447,7 +619,21 @@ function Download-GdriveFile
             if ($uuid) {
                 $downloadUrl += "&uuid=$uuid"
             }
-            Write-Host "  (debug: uuid='$uuid', url=$downloadUrl)" -ForegroundColor DarkGray
+
+            # Extract cookies from WebSession as raw string for HttpClient (cross-domain)
+            $cookieHeader = ""
+            if ($session -and $session.Cookies) {
+                $cookieParts = @()
+                $downloadUri = [Uri]$downloadUrl
+                foreach ($cookie in $session.Cookies.GetCookies($downloadUri)) {
+                    $cookieParts += "$($cookie.Name)=$($cookie.Value)"
+                }
+                $gdriveUri = [Uri]"https://drive.google.com/"
+                foreach ($cookie in $session.Cookies.GetCookies($gdriveUri)) {
+                    $cookieParts += "$($cookie.Name)=$($cookie.Value)"
+                }
+                $cookieHeader = $cookieParts -join "; "
+            }
 
             $maxRetries = 3
             $retryCount = 0
@@ -458,8 +644,15 @@ function Download-GdriveFile
                     Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
                 }
                 try {
-		    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing -TimeoutSec 0 | Out-Null
-                    $downloaded = $true
+                    # Try parallel chunked download first
+                    if (Download-ParallelChunks -Url $downloadUrl -Destination $tempFile -CookieHeader $cookieHeader) {
+                        $downloaded = $true
+                    } else {
+                        # Fall back to single-stream Invoke-WebRequest
+                        Write-Host "  (single-stream)" -ForegroundColor DarkGray
+                        Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing -TimeoutSec 0 | Out-Null
+                        $downloaded = $true
+                    }
                 } catch {
                     if ($retryCount -lt $maxRetries) {
                         Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
@@ -478,10 +671,13 @@ function Download-GdriveFile
             $verifyContent = [System.Text.Encoding]::UTF8.GetString($verifyBytes, 0, $verifyBytesRead)
 
             if ($verifyContent -match '<html' -or $verifyContent -match '<!DOCTYPE') {
-                Write-Host "  (debug: got HTML, first 200 chars: $($verifyContent.Substring(0, [math]::Min(200, $verifyContent.Length))))" -ForegroundColor DarkGray
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
                 Write-Host "  FAILED!" -ForegroundColor Red
-                Write-Host "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
+                if ($verifyContent -match 'Quota exceeded') {
+                    Write-Host "  Error: Google Drive quota exceeded for this file (too many downloads in 24h)." -ForegroundColor Red
+                } else {
+                    Write-Host "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
+                }
                 return $false
             }
         }
@@ -573,7 +769,7 @@ function Download-DataFiles
         } else {
             # Try mirrors if available
             $mirrors = $null
-            if ($MirrorFiles -and $MirrorFiles.ContainsKey($id)) {
+            if ($MirrorFiles -and $MirrorFiles.Contains($id)) {
                 $mirrors = $MirrorFiles[$id].Urls
             }
             if ($mirrors -and $mirrors.Count -gt 0) {
