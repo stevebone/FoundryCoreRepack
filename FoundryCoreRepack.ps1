@@ -1162,6 +1162,11 @@ if ($dataSetupDone) {
     }
 }
     $dataSetupDone = $true
+
+    # Persist ServerDataSetup=1 immediately so it survives even if script exits before GenAI setup
+    $existingGenAISetup = if ($config) { [int]$config["GenAISetup"] } else { 0 }
+    $existingGenAIEnable = if ($config) { [int]$config["GenAIEnable"] } else { 0 }
+    Write-Config -FirstTime $isFirstTime -DataSetup 1 -GenAISetup $existingGenAISetup -GenAIEnable $existingGenAIEnable
 }
 
 # Step 8b: GenAI Server Setup
