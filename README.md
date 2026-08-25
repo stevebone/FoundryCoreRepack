@@ -3,6 +3,7 @@
 - A PowerShell-based launcher that downloads and prepares a full TrinityCore server installation from a manifest file. 
 - Supports first-time install and update modes with automatic file versioning, Google Drive large file downloads, mirror fallback, and optional GenAI integration for Followship Bots.
 - The core is based on the public TrinityCore fork: https://github.com/stevebone/StefalWoW
+- Current supported client version is latest Midnight Expansion 12.x version.
 - Discord: [**https://discord.gg/fggW9fHJNd**](https://discord.gg/fggW9fHJNd)
 
 ## Features
