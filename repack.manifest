@@ -3,7 +3,7 @@ FoundryCoreRepack=[25082026-00, https://raw.githubusercontent.com/stevebone/Foun
 [zip]
 serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/ServerLib.zip]
 mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
-sqlbase=[24082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/SqlBase.zip]
+sqlbase=[27082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/SqlBase.zip]
 bnetserver=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/BnetServer.zip]
 worldserver=[26082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/WorldServer.zip]
 [sql]
