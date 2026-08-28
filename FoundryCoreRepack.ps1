@@ -13,14 +13,85 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "25082026-00"
+$scriptVersion = "28082026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
+$logFile = Join-Path $scriptDir "repack.log"
+
+# Initialize log file (overwrite on each script start)
+Set-Content -Path $logFile -Value "" -Encoding UTF8
+
+# Script-scoped buffer for -NoNewline accumulation
+$script:logBuffer = ""
 
 # ============================================================
 # Functions
 # ============================================================
+
+function Write-Log
+{
+    param(
+        [Parameter(Position = 0, ValueFromPipeline, ValueFromRemainingArguments)]
+        [object]$Object,
+        [string]$ForegroundColor,
+        [switch]$NoNewline
+    )
+
+    # Convert object to string
+    if ($null -eq $Object) { $msg = "" }
+    elseif ($Object -is [string]) { $msg = $Object }
+    else { $msg = ($Object | Out-String).TrimEnd() }
+
+    # Strip carriage returns from log output (progress bar overwrites)
+    $logMsg = $msg -replace "`r", ""
+
+    # Write to terminal exactly as Write-Host would
+    if ($NoNewline)
+    {
+        if ($ForegroundColor) { Write-Host $msg -ForegroundColor $ForegroundColor -NoNewline }
+        else { Write-Host $msg -NoNewline }
+
+        # Buffer for log; flush when a non-NoNewline call arrives
+        $script:logBuffer += $logMsg
+    }
+    else
+    {
+        if ($ForegroundColor) { Write-Host $msg -ForegroundColor $ForegroundColor }
+        else { Write-Host $msg }
+
+        # Flush buffer + current message to log with timestamp
+        $fullMsg = $script:logBuffer + $logMsg
+        $script:logBuffer = ""
+
+        if ($fullMsg -eq "")
+        {
+            # Empty line — log as blank line without timestamp
+            Add-Content -Path $logFile -Value "" -Encoding UTF8
+        }
+        else
+        {
+            $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Add-Content -Path $logFile -Value "[$timestamp] $fullMsg" -Encoding UTF8
+        }
+    }
+}
+
+function Read-HostLog
+{
+    param(
+        [Parameter(Position = 0)]
+        [string]$Prompt
+    )
+
+    $response = Read-Host $Prompt
+
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $logLine = if ($Prompt) { "[$timestamp] [INPUT] $Prompt : $response" } else { "[$timestamp] [INPUT] $response" }
+    Add-Content -Path $logFile -Value $logLine -Encoding UTF8
+
+    return $response
+}
 
 function Show-Banner
 {
@@ -32,12 +103,12 @@ function Show-Banner
 |_|  \___/ \__,_|_| |_|\__,_|_|   \__, |  \____\___/|_|  \___|
                                   |___/                       
 '@
-    Write-Host ""
-    Write-Host $banner -ForegroundColor Cyan
-    Write-Host "  ==============================================" -ForegroundColor Cyan
-    Write-Host "                   Repack Launcher               " -ForegroundColor Yellow
-    Write-Host "  ==============================================" -ForegroundColor Cyan
-    Write-Host ""
+    Write-Log ""
+    Write-Log $banner -ForegroundColor Cyan
+    Write-Log "  ==============================================" -ForegroundColor Cyan
+    Write-Log "                   Repack Launcher               " -ForegroundColor Yellow
+    Write-Log "  ==============================================" -ForegroundColor Cyan
+    Write-Log ""
 }
 
 function Read-Config
@@ -76,7 +147,7 @@ function Write-Config
     $lines += "GenAIEnable=$GenAIEnable"
 
     $lines | Out-File -FilePath $configFile -Encoding UTF8 -Force
-    Write-Host "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, ServerDataSetup=$DataSetup, GenAISetup=$GenAISetup, GenAIEnable=$GenAIEnable" -ForegroundColor DarkGray
+    Write-Log "[Config] repack.conf written: FirstTimeInstall=1, LastUpdated=$timestamp, ServerDataSetup=$DataSetup, GenAISetup=$GenAISetup, GenAIEnable=$GenAIEnable" -ForegroundColor DarkGray
 }
 
 function Download-File
@@ -102,7 +173,7 @@ function Download-File
                    elseif ($size -ge 1KB) { "{0:N2} KB" -f ($size / 1KB) }
                    else { "$size B" }
 
-        Write-Host "  Downloading: $fileName ($sizeStr)..." -ForegroundColor White
+        Write-Log "  Downloading: $fileName ($sizeStr)..." -ForegroundColor White
 
         $maxRetries = 3
         $retryCount = 0
@@ -110,27 +181,27 @@ function Download-File
         while (!$downloaded -and $retryCount -lt $maxRetries) {
             $retryCount++
             if ($retryCount -gt 1) {
-                Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
+                Write-Log "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
             }
             try {
                 Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 0
                 $downloaded = $true
             } catch {
                 if ($retryCount -lt $maxRetries) {
-                    Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-Host "  Retrying..." -ForegroundColor DarkYellow
+                    Write-Log "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Log "  Retrying..." -ForegroundColor DarkYellow
                 } else {
                     throw
                 }
             }
         }
-        Write-Host "  Done." -ForegroundColor Green
+        Write-Log "  Done." -ForegroundColor Green
         return $true
     }
     catch
     {
-        Write-Host " FAILED!" -ForegroundColor Red
-        Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log " FAILED!" -ForegroundColor Red
+        Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
@@ -141,7 +212,7 @@ function Parse-Manifest
 
     if (!(Test-Path $ManifestPath))
     {
-        Write-Host "[Error] Manifest file not found: $ManifestPath" -ForegroundColor Red
+        Write-Log "[Error] Manifest file not found: $ManifestPath" -ForegroundColor Red
         return $null
     }
 
@@ -186,7 +257,7 @@ function Parse-Manifest
                     $sections[$currentSection][$id] = @{ Version = $version; Url = $url }
                 }
             } else {
-                Write-Host "[Manifest] Warning: Could not parse line: $line" -ForegroundColor DarkYellow
+                Write-Log "[Manifest] Warning: Could not parse line: $line" -ForegroundColor DarkYellow
             }
         }
     }
@@ -213,7 +284,7 @@ function Compare-Manifest
     }
 
     if (!$LocalSections) {
-        Write-Host "[Manifest] No local manifest found - all files will be downloaded." -ForegroundColor DarkYellow
+        Write-Log "[Manifest] No local manifest found - all files will be downloaded." -ForegroundColor DarkYellow
     }
 
     foreach ($sectionName in $RemoteSections.Keys) {
@@ -225,13 +296,13 @@ function Compare-Manifest
             $localEntry = $localFiles[$id]
 
             if (!$localEntry) {
-                Write-Host "[Manifest] $sectionName/${id}: NEW (not in local)" -ForegroundColor DarkYellow
+                Write-Log "[Manifest] $sectionName/${id}: NEW (not in local)" -ForegroundColor DarkYellow
                 $changed[$sectionName][$id] = $remoteFiles[$id]
             } elseif ($localEntry.Version -ne $remoteVer) {
-                Write-Host "[Manifest] $sectionName/${id}: CHANGED (local='$($localEntry.Version)' remote='$remoteVer')" -ForegroundColor DarkYellow
+                Write-Log "[Manifest] $sectionName/${id}: CHANGED (local='$($localEntry.Version)' remote='$remoteVer')" -ForegroundColor DarkYellow
                 $changed[$sectionName][$id] = $remoteFiles[$id]
             } else {
-                Write-Host "[Manifest] $sectionName/${id}: up-to-date (v=$remoteVer)" -ForegroundColor DarkGray
+                Write-Log "[Manifest] $sectionName/${id}: up-to-date (v=$remoteVer)" -ForegroundColor DarkGray
             }
         }
     }
@@ -281,12 +352,12 @@ function Download-ZipFiles
 
     if ($Files.Count -eq 0)
     {
-        Write-Host "[ZIP] No zip files to download." -ForegroundColor DarkGray
+        Write-Log "[ZIP] No zip files to download." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host ""
-    Write-Host "[ZIP] Downloading and extracting $($Files.Count) zip file(s)..." -ForegroundColor Cyan
+    Write-Log ""
+    Write-Log "[ZIP] Downloading and extracting $($Files.Count) zip file(s)..." -ForegroundColor Cyan
 
     foreach ($id in $Files.Keys)
     {
@@ -294,21 +365,21 @@ function Download-ZipFiles
         $fileName = [System.IO.Path]::GetFileName([System.Uri]$url)
         $tempZip = Join-Path $scriptDir $fileName
 
-        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        Write-Log "  [$id]" -ForegroundColor Cyan -NoNewline
         if (!(Download-File -Url $url -Destination $tempZip)) {
             continue
         }
 
-        Write-Host "  Extracting: $fileName..." -NoNewline -ForegroundColor White
+        Write-Log "  Extracting: $fileName..." -NoNewline -ForegroundColor White
         try
         {
             Expand-Archive -Path $tempZip -DestinationPath $scriptDir -Force
-            Write-Host " Done." -ForegroundColor Green
+            Write-Log " Done." -ForegroundColor Green
         }
         catch
         {
-            Write-Host " FAILED!" -ForegroundColor Red
-            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Log " FAILED!" -ForegroundColor Red
+            Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
         }
 
         if (Test-Path $tempZip) {
@@ -323,12 +394,12 @@ function Download-SqlFiles
 
     if ($Files.Count -eq 0)
     {
-        Write-Host "[SQL] No SQL files to download." -ForegroundColor DarkGray
+        Write-Log "[SQL] No SQL files to download." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host ""
-    Write-Host "[SQL] Downloading $($Files.Count) SQL file(s)..." -ForegroundColor Cyan
+    Write-Log ""
+    Write-Log "[SQL] Downloading $($Files.Count) SQL file(s)..." -ForegroundColor Cyan
 
     foreach ($id in $Files.Keys)
     {
@@ -339,7 +410,7 @@ function Download-SqlFiles
         # Normalize path separators
         $destination = $destination -replace '/', '\'
 
-        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        Write-Log "  [$id]" -ForegroundColor Cyan -NoNewline
         Download-File -Url $url -Destination $destination | Out-Null
     }
 }
@@ -350,19 +421,19 @@ function Download-OtherFiles
 
     if ($Files.Count -eq 0)
     {
-        Write-Host "[Other] No other files to download." -ForegroundColor DarkGray
+        Write-Log "[Other] No other files to download." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host ""
-    Write-Host "[Other] Downloading $($Files.Count) file(s)..." -ForegroundColor Cyan
+    Write-Log ""
+    Write-Log "[Other] Downloading $($Files.Count) file(s)..." -ForegroundColor Cyan
 
     foreach ($id in $Files.Keys)
     {
         $url = $Files[$id].Url
         $fileName = [System.IO.Path]::GetFileName([System.Uri]$url)
         $destination = Join-Path $scriptDir $fileName
-        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        Write-Log "  [$id]" -ForegroundColor Cyan -NoNewline
         Download-File -Url $url -Destination $destination | Out-Null
     }
 }
@@ -433,7 +504,7 @@ function Download-ParallelChunks
             return $false
         }
 
-        Write-Host "  (parallel: $NumChunks chunks, $([math]::Round($totalSize / 1MB, 1)) MB)" -ForegroundColor DarkGray
+        Write-Log "  (parallel: $NumChunks chunks, $([math]::Round($totalSize / 1MB, 1)) MB)" -ForegroundColor DarkGray
 
         $chunkSize = [math]::Floor($totalSize / $NumChunks)
         $tempDir = [System.IO.Path]::GetDirectoryName($Destination)
@@ -511,7 +582,7 @@ function Download-ParallelChunks
                 $copyTasks += $stream.CopyToAsync($fs)
             } catch {
                 $failed = $true
-                Write-Host "  Chunk $i failed: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Log "  Chunk $i failed: $($_.Exception.Message)" -ForegroundColor Red
             }
         }
 
@@ -526,9 +597,9 @@ function Download-ParallelChunks
                     }
                 }
                 $pct = [math]::Round(($downloadedBytes / $totalSize) * 100, 1)
-                Write-Host ("`r  {0}% ({1:N1} MB / {2:N1} MB)   " -f $pct, ($downloadedBytes / 1MB), ($totalSize / 1MB)) -NoNewline
+                Write-Log ("`r  {0}% ({1:N1} MB / {2:N1} MB)   " -f $pct, ($downloadedBytes / 1MB), ($totalSize / 1MB)) -NoNewline
             }
-            Write-Host ""
+            Write-Log ""
         }
 
         # Cleanup streams and clients
@@ -561,7 +632,7 @@ function Download-ParallelChunks
         return $true
     }
     catch {
-        Write-Host "  Parallel download error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log "  Parallel download error: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
     finally {
@@ -579,7 +650,7 @@ function Download-GdriveFile
 
     $fileId = Get-GdriveFileId -Url $Url
     if (!$fileId) {
-        Write-Host "  FAILED! Could not extract file ID from Google Drive URL." -ForegroundColor Red
+        Write-Log "  FAILED! Could not extract file ID from Google Drive URL." -ForegroundColor Red
         return $false
     }
 
@@ -592,7 +663,7 @@ function Download-GdriveFile
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
 
-        Write-Host "  Downloading: $fileName from Google Drive..." -ForegroundColor White
+        Write-Log "  Downloading: $fileName from Google Drive..." -ForegroundColor White
 
         $tempFile = [System.IO.Path]::GetTempFileName()
         $session = $null
@@ -612,7 +683,7 @@ function Download-GdriveFile
         $isHtml = $peekContent -match '<html' -or $peekContent -match '<!DOCTYPE'
 
         if ($isHtml) {
-            Write-Host "  (confirming)..." -ForegroundColor DarkYellow
+            Write-Log "  (confirming)..." -ForegroundColor DarkYellow
 
             # Read first 64KB for uuid extraction (stream-based to avoid 2GB .NET limit)
             $uuidBytes = New-Object byte[] 65536
@@ -652,7 +723,7 @@ function Download-GdriveFile
             while (!$downloaded -and $retryCount -lt $maxRetries) {
                 $retryCount++
                 if ($retryCount -gt 1) {
-                    Write-Host "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
+                    Write-Log "  Attempt $retryCount of $maxRetries..." -ForegroundColor DarkYellow
                 }
                 try {
                     # Try parallel chunked download first
@@ -660,14 +731,14 @@ function Download-GdriveFile
                         $downloaded = $true
                     } else {
                         # Fall back to single-stream Invoke-WebRequest
-                        Write-Host "  (single-stream)" -ForegroundColor DarkGray
+                        Write-Log "  (single-stream)" -ForegroundColor DarkGray
                         Invoke-WebRequest -Uri $downloadUrl -OutFile $tempFile -WebSession $session -UseBasicParsing -TimeoutSec 0 | Out-Null
                         $downloaded = $true
                     }
                 } catch {
                     if ($retryCount -lt $maxRetries) {
-                        Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
-                        Write-Host "  Retrying..." -ForegroundColor DarkYellow
+                        Write-Log "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Log "  Retrying..." -ForegroundColor DarkYellow
                     } else {
                         throw
                     }
@@ -683,11 +754,11 @@ function Download-GdriveFile
 
             if ($verifyContent -match '<html' -or $verifyContent -match '<!DOCTYPE') {
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-                Write-Host "  FAILED!" -ForegroundColor Red
+                Write-Log "  FAILED!" -ForegroundColor Red
                 if ($verifyContent -match 'Quota exceeded') {
-                    Write-Host "  Error: Google Drive quota exceeded for this file (too many downloads in 24h)." -ForegroundColor Red
+                    Write-Log "  Error: Google Drive quota exceeded for this file (too many downloads in 24h)." -ForegroundColor Red
                 } else {
-                    Write-Host "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
+                    Write-Log "  Error: Could not bypass Google Drive confirmation page." -ForegroundColor Red
                 }
                 return $false
             }
@@ -699,13 +770,13 @@ function Download-GdriveFile
         $sizeStr = if ($size -ge 1MB) { "{0:N2} MB" -f ($size / 1MB) }
                    elseif ($size -ge 1KB) { "{0:N2} KB" -f ($size / 1KB) }
                    else { "$size B" }
-        Write-Host " Done ($sizeStr)." -ForegroundColor Green
+        Write-Log " Done ($sizeStr)." -ForegroundColor Green
         return $true
     }
     catch
     {
-        Write-Host " FAILED!" -ForegroundColor Red
-        Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Log " FAILED!" -ForegroundColor Red
+        Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
@@ -716,33 +787,33 @@ function Download-GdriveFiles
 
     if ($Files.Count -eq 0)
     {
-        Write-Host "[GDrive] No Google Drive files to download." -ForegroundColor DarkGray
+        Write-Log "[GDrive] No Google Drive files to download." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host ""
-    Write-Host "[GDrive] Downloading and extracting $($Files.Count) zip file(s) from Google Drive..." -ForegroundColor Cyan
+    Write-Log ""
+    Write-Log "[GDrive] Downloading and extracting $($Files.Count) zip file(s) from Google Drive..." -ForegroundColor Cyan
 
     foreach ($id in $Files.Keys)
     {
         $url = $Files[$id].Url
         $tempZip = Join-Path $scriptDir "$id.zip"
 
-        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        Write-Log "  [$id]" -ForegroundColor Cyan -NoNewline
         if (!(Download-GdriveFile -Url $url -Destination $tempZip)) {
             continue
         }
 
-        Write-Host "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
+        Write-Log "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
         try
         {
             Expand-Archive -Path $tempZip -DestinationPath $scriptDir -Force
-            Write-Host " Done." -ForegroundColor Green
+            Write-Log " Done." -ForegroundColor Green
         }
         catch
         {
-            Write-Host " FAILED!" -ForegroundColor Red
-            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Log " FAILED!" -ForegroundColor Red
+            Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
         }
 
         if (Test-Path $tempZip) {
@@ -760,12 +831,12 @@ function Download-DataFiles
 
     if ($DataFiles.Count -eq 0)
     {
-        Write-Host "[Data] No data files to download." -ForegroundColor DarkGray
+        Write-Log "[Data] No data files to download." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host ""
-    Write-Host "[Data] Downloading and extracting $($DataFiles.Count) data file(s)..." -ForegroundColor Cyan
+    Write-Log ""
+    Write-Log "[Data] Downloading and extracting $($DataFiles.Count) data file(s)..." -ForegroundColor Cyan
 
     foreach ($id in $DataFiles.Keys)
     {
@@ -774,7 +845,7 @@ function Download-DataFiles
         $downloaded = $false
 
         # Try Google Drive first
-        Write-Host "  [$id]" -ForegroundColor Cyan -NoNewline
+        Write-Log "  [$id]" -ForegroundColor Cyan -NoNewline
         if (Download-GdriveFile -Url $url -Destination $tempZip) {
             $downloaded = $true
         } else {
@@ -784,9 +855,9 @@ function Download-DataFiles
                 $mirrors = $MirrorFiles[$id].Urls
             }
             if ($mirrors -and $mirrors.Count -gt 0) {
-                Write-Host "  [$id] Trying $($mirrors.Count) mirror(s)..." -ForegroundColor DarkYellow
+                Write-Log "  [$id] Trying $($mirrors.Count) mirror(s)..." -ForegroundColor DarkYellow
                 foreach ($mirrorUrl in $mirrors) {
-                    Write-Host "  [$id] Mirror: $mirrorUrl" -ForegroundColor DarkGray
+                    Write-Log "  [$id] Mirror: $mirrorUrl" -ForegroundColor DarkGray
                     if (Download-File -Url $mirrorUrl -Destination $tempZip) {
                         $downloaded = $true
                         break
@@ -796,20 +867,20 @@ function Download-DataFiles
         }
 
         if (!$downloaded) {
-            Write-Host "  [$id] FAILED - no source available." -ForegroundColor Red
+            Write-Log "  [$id] FAILED - no source available." -ForegroundColor Red
             continue
         }
 
-        Write-Host "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
+        Write-Log "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
         try
         {
             Expand-Archive -Path $tempZip -DestinationPath $scriptDir -Force
-            Write-Host " Done." -ForegroundColor Green
+            Write-Log " Done." -ForegroundColor Green
         }
         catch
         {
-            Write-Host " FAILED!" -ForegroundColor Red
-            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Log " FAILED!" -ForegroundColor Red
+            Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
         }
 
         if (Test-Path $tempZip) {
@@ -824,18 +895,18 @@ function Setup-GenAI
         [switch]$Force
     )
 
-    Write-Host ""
-    Write-Host ("=" * 80) -ForegroundColor DarkCyan
-    Write-Host "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
-    Write-Host "!!! Warning: running a GenAI server on your machine can be quite demanding." -ForegroundColor Yellow
-    Write-Host "!!! Required: An RTX GPU with cuda capabilities." -ForegroundColor Yellow
-    Write-Host "!!! If you do not want to use Llama CPP you can still set up your own GenAI provider, local or cloud." -ForegroundColor Yellow
-    Write-Host "Do you want to install a local Llama CPP GenAI provider on your machine?" -ForegroundColor White
-    Write-Host "This will also enable GenAI functionality for Followship Bots." -ForegroundColor White
-    Write-Host "  1. Yes, I want a local Llama CPP server" -ForegroundColor White
-    Write-Host "  2. No, I do not want or I will set it up myself later." -ForegroundColor White
-    Write-Host ""
-    $genaiChoice = Read-Host "Enter your choice (1/2)"
+    Write-Log ""
+    Write-Log ("=" * 80) -ForegroundColor DarkCyan
+    Write-Log "Generative AI Server for Followship Bots GenAI Features" -ForegroundColor Cyan
+    Write-Log "!!! Warning: running a GenAI server on your machine can be quite demanding." -ForegroundColor Yellow
+    Write-Log "!!! Required: An RTX GPU with cuda capabilities." -ForegroundColor Yellow
+    Write-Log "!!! If you do not want to use Llama CPP you can still set up your own GenAI provider, local or cloud." -ForegroundColor Yellow
+    Write-Log "Do you want to install a local Llama CPP GenAI provider on your machine?" -ForegroundColor White
+    Write-Log "This will also enable GenAI functionality for Followship Bots." -ForegroundColor White
+    Write-Log "  1. Yes, I want a local Llama CPP server" -ForegroundColor White
+    Write-Log "  2. No, I do not want or I will set it up myself later." -ForegroundColor White
+    Write-Log ""
+    $genaiChoice = Read-HostLog "Enter your choice (1/2)"
 
     $genAIEnable = 0
 
@@ -843,42 +914,42 @@ function Setup-GenAI
     {
         "1"
         {
-            Write-Host ""
-            Write-Host "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
+            Write-Log ""
+            Write-Log "[GenAI] Downloading Llama CPP GenAI server files..." -ForegroundColor Cyan
             if (!$Force -and $genaiChanged -eq 0 -and $genaiTotal -gt 0) {
-                Write-Host "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
+                Write-Log "[GenAI] GenAI files already up-to-date. Skipping download." -ForegroundColor DarkGray
             } elseif ($genaiTotal -eq 0) {
-                Write-Host "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
+                Write-Log "[GenAI] No GenAI files found in manifest. Skipping download." -ForegroundColor DarkGray
             } else {
                 Download-GdriveFiles -Files $sections["genai"]
-                Write-Host "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
+                Write-Log "[GenAI] GenAI server files downloaded and extracted." -ForegroundColor Green
             }
             $genAIEnable = 1
 
             # Update GenAI.conf to enable GenAI for Followship Bots
             $genaiConf = Join-Path $scriptDir "Server\worldserver.conf.d\GenAI.conf"
             if (Test-Path $genaiConf) {
-                Write-Host "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
+                Write-Log "[GenAI] Enabling GenAI in worldserver config..." -ForegroundColor White
                 $confContent = Get-Content $genaiConf -Raw
                 $confContent = $confContent -replace 'Followship\.Bots\.GenAI\.Enabled\s*=\s*0', 'Followship.Bots.GenAI.Enabled = 1'
                 [System.IO.File]::WriteAllText($genaiConf, $confContent, (New-Object System.Text.UTF8Encoding $false))
-                Write-Host "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
+                Write-Log "[GenAI] GenAI enabled in $genaiConf" -ForegroundColor Green
             } else {
-                Write-Host "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
-                Write-Host "[GenAI] You will need to set Followship.Bots.GenAI.Enabled = 1 manually." -ForegroundColor Yellow
+                Write-Log "[GenAI] Config file not found: $genaiConf" -ForegroundColor Red
+                Write-Log "[GenAI] You will need to set Followship.Bots.GenAI.Enabled = 1 manually." -ForegroundColor Yellow
             }
         }
         "2"
         {
-            Write-Host ""
-            Write-Host "[GenAI] You chose not to install a local Llama CPP server." -ForegroundColor Yellow
-            Write-Host "[GenAI] You can set up your own GenAI provider later (local or cloud)." -ForegroundColor Yellow
+            Write-Log ""
+            Write-Log "[GenAI] You chose not to install a local Llama CPP server." -ForegroundColor Yellow
+            Write-Log "[GenAI] You can set up your own GenAI provider later (local or cloud)." -ForegroundColor Yellow
             $genAIEnable = 0
         }
         default
         {
-            Write-Host ""
-            Write-Host "[GenAI] Invalid choice. Skipping GenAI setup." -ForegroundColor Red
+            Write-Log ""
+            Write-Log "[GenAI] Invalid choice. Skipping GenAI setup." -ForegroundColor Red
             $genAIEnable = 0
         }
     }
@@ -901,32 +972,33 @@ $isFirstTime = $null -eq $config
 
 if ($isFirstTime)
 {
-    Write-Host ">> First-time installation detected." -ForegroundColor Yellow
-    Write-Host ">> repack.conf not found. This will be a full install." -ForegroundColor Yellow
+    Write-Log ">> First-time installation detected." -ForegroundColor Yellow
+    Write-Log ">> repack.conf not found. This will be a full install." -ForegroundColor Yellow
 }
 else
 {
     $lastUpdated = $config["LastUpdated"]
-    Write-Host ">> Update mode. Previous install detected." -ForegroundColor Yellow
+    Write-Log ">> Update mode. Previous install detected." -ForegroundColor Yellow
     if ($lastUpdated) {
-        Write-Host ">> Last updated: $lastUpdated" -ForegroundColor DarkGray
+        Write-Log ">> Last updated: $lastUpdated" -ForegroundColor DarkGray
     }
 }
 
-Write-Host ""
+Write-Log ""
 
 # Step 3: Parse local manifest (if exists) before downloading remote
 $localSections = $null
 if (Test-Path $manifestFile) {
-    Write-Host "[Manifest] Found existing local manifest. Parsing for version comparison..." -ForegroundColor DarkGray
+    Write-Log "[Manifest] Found existing local manifest. Parsing for version comparison..." -ForegroundColor DarkGray
     $localSections = Parse-Manifest -ManifestPath $manifestFile
 }
 
 # Step 3b: Download remote manifest to temp file
-Write-Host "[Manifest] Downloading remote repack.manifest..." -ForegroundColor Cyan
+Write-Log "[Manifest] Downloading remote repack.manifest..." -ForegroundColor Cyan
 if (!(Download-File -Url $ManifestUrl -Destination $manifestTempFile))
 {
-    Write-Host "[Error] Failed to download manifest. Aborting." -ForegroundColor Red
+    Write-Log "[Error] Failed to download manifest. Aborting." -ForegroundColor Red
+    Write-Log "Script terminated."
     exit 1
 }
 
@@ -934,7 +1006,8 @@ if (!(Download-File -Url $ManifestUrl -Destination $manifestTempFile))
 $sections = Parse-Manifest -ManifestPath $manifestTempFile
 if ($null -eq $sections)
 {
-    Write-Host "[Error] Failed to parse manifest. Aborting." -ForegroundColor Red
+    Write-Log "[Error] Failed to parse manifest. Aborting." -ForegroundColor Red
+    Write-Log "Script terminated."
     exit 1
 }
 
@@ -960,15 +1033,15 @@ $sqlSkipped = $sqlTotal - $sqlChanged
 $otherSkipped = $otherTotal - $otherChanged
 $gdriveSkipped = $gdriveTotal - $gdriveChanged
 
-Write-Host ""
-Write-Host "[Manifest] Parsed successfully:" -ForegroundColor Cyan
-Write-Host "  ZIP files:    $zipTotal ($zipChanged changed, $zipSkipped up-to-date)" -ForegroundColor White
-Write-Host "  SQL files:    $sqlTotal ($sqlChanged changed, $sqlSkipped up-to-date)" -ForegroundColor White
-Write-Host "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up-to-date)" -ForegroundColor White
-Write-Host "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
-Write-Host "  Data files:   $dataTotal" -ForegroundColor White
-Write-Host "  Data mirrors: $($sections['datamirror'].Count)" -ForegroundColor White
-Write-Host "  GenAI files:  $genaiTotal ($genaiChanged changed)" -ForegroundColor White
+Write-Log ""
+Write-Log "[Manifest] Parsed successfully:" -ForegroundColor Cyan
+Write-Log "  ZIP files:    $zipTotal ($zipChanged changed, $zipSkipped up-to-date)" -ForegroundColor White
+Write-Log "  SQL files:    $sqlTotal ($sqlChanged changed, $sqlSkipped up-to-date)" -ForegroundColor White
+Write-Log "  Other files:  $otherTotal ($otherChanged changed, $otherSkipped up-to-date)" -ForegroundColor White
+Write-Log "  GDrive files: $gdriveTotal ($gdriveChanged changed, $gdriveSkipped up-to-date)" -ForegroundColor White
+Write-Log "  Data files:   $dataTotal" -ForegroundColor White
+Write-Log "  Data mirrors: $($sections['datamirror'].Count)" -ForegroundColor White
+Write-Log "  GenAI files:  $genaiTotal ($genaiChanged changed)" -ForegroundColor White
 
 # Step 4c: Check for script self-update
 if ($sections["script"].Count -gt 0) {
@@ -976,24 +1049,25 @@ if ($sections["script"].Count -gt 0) {
         $remoteScriptVersion = $sections["script"][$id].Version
         $remoteScriptUrl = $sections["script"][$id].Url
         if ($remoteScriptVersion -ne $scriptVersion) {
-            Write-Host ""
-            Write-Host "[Update] Script update available: v=$scriptVersion -> v=$remoteScriptVersion" -ForegroundColor Yellow
-            Write-Host "[Update] Downloading new script..." -ForegroundColor Cyan
+            Write-Log ""
+            Write-Log "[Update] Script update available: v=$scriptVersion -> v=$remoteScriptVersion" -ForegroundColor Yellow
+            Write-Log "[Update] Downloading new script..." -ForegroundColor Cyan
             $tempScript = Join-Path $scriptDir "FoundryCoreRepack.ps1.new"
             if (Download-File -Url $remoteScriptUrl -Destination $tempScript) {
                 $currentScript = $MyInvocation.MyCommand.Path
                 Move-Item -Path $tempScript -Destination $currentScript -Force
-                Write-Host "[Update] Script updated to version $remoteScriptVersion." -ForegroundColor Green
-                Write-Host "[Update] Please restart the launcher to apply the update." -ForegroundColor Yellow
-                Write-Host ""
-                Write-Host "Press any key to exit..." -ForegroundColor White
+                Write-Log "[Update] Script updated to version $remoteScriptVersion." -ForegroundColor Green
+                Write-Log "[Update] Please restart the launcher to apply the update." -ForegroundColor Yellow
+                Write-Log ""
+                Write-Log "Press any key to exit..." -ForegroundColor White
                 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                Write-Log "Script terminated for update."
                 exit 0
             } else {
-                Write-Host "[Update] Failed to download new script. Continuing with current version." -ForegroundColor Red
+                Write-Log "[Update] Failed to download new script. Continuing with current version." -ForegroundColor Red
             }
         } else {
-            Write-Host "  Script:       v=$scriptVersion (up-to-date)" -ForegroundColor DarkGray
+            Write-Log "  Script:       v=$scriptVersion (up-to-date)" -ForegroundColor DarkGray
         }
     }
 }
@@ -1008,23 +1082,23 @@ Download-OtherFiles -Files $changed["other"]
 Move-Item -Path $manifestTempFile -Destination $manifestFile -Force
 
 # Step 6: Summary
-Write-Host ""
-Write-Host ("=" * 80) -ForegroundColor DarkCyan
-Write-Host "Summary" -ForegroundColor Cyan
-Write-Host "  ZIP files:    $zipChanged downloaded, $zipSkipped skipped" -ForegroundColor White
-Write-Host "  GDrive files: $gdriveChanged downloaded, $gdriveSkipped skipped" -ForegroundColor White
-Write-Host "  SQL files:    $sqlChanged downloaded, $sqlSkipped skipped" -ForegroundColor White
-Write-Host "  Other files:  $otherChanged downloaded, $otherSkipped skipped" -ForegroundColor White
-Write-Host ""
+Write-Log ""
+Write-Log ("=" * 80) -ForegroundColor DarkCyan
+Write-Log "Summary" -ForegroundColor Cyan
+Write-Log "  ZIP files:    $zipChanged downloaded, $zipSkipped skipped" -ForegroundColor White
+Write-Log "  GDrive files: $gdriveChanged downloaded, $gdriveSkipped skipped" -ForegroundColor White
+Write-Log "  SQL files:    $sqlChanged downloaded, $sqlSkipped skipped" -ForegroundColor White
+Write-Log "  Other files:  $otherChanged downloaded, $otherSkipped skipped" -ForegroundColor White
+Write-Log ""
 
-Write-Host ""
+Write-Log ""
 if ($isFirstTime) {
-    Write-Host ">> First-time installation complete!" -ForegroundColor Green
+    Write-Log ">> First-time installation complete!" -ForegroundColor Green
 } else {
-    Write-Host ">> Update complete!" -ForegroundColor Green
+    Write-Log ">> Update complete!" -ForegroundColor Green
 }
 
-Write-Host ("=" * 80) -ForegroundColor DarkCyan
+Write-Log ("=" * 80) -ForegroundColor DarkCyan
 
 # Step 8: Server Data Setup
 $dataSetupDone = $false
@@ -1033,17 +1107,17 @@ if (!$isFirstTime -and $config["ServerDataSetup"] -eq "1") {
 }
 
 if ($dataSetupDone) {
-    Write-Host ""
-    Write-Host "[Data] Server data already set up (ServerDataSetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
+    Write-Log ""
+    Write-Log "[Data] Server data already set up (ServerDataSetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
 } else {
-    Write-Host ""
-    Write-Host "Server Data Setup" -ForegroundColor Cyan
-    Write-Host "How do you want to add the Server Data like Maps, Vmaps, MMaps, DB2 etc?" -ForegroundColor Yellow
-    Write-Host "  1. Automatic Download - use this option if your internet is fast or your computer is low end" -ForegroundColor White
-    Write-Host "  2. Extraction from game client (requires client on this machine)" -ForegroundColor White
-    Write-Host "  3. Manual: I will add them myself later in the Data directory." -ForegroundColor White
-    Write-Host ""
-    $choice = Read-Host "Enter your choice (1/2/3)"
+    Write-Log ""
+    Write-Log "Server Data Setup" -ForegroundColor Cyan
+    Write-Log "How do you want to add the Server Data like Maps, Vmaps, MMaps, DB2 etc?" -ForegroundColor Yellow
+    Write-Log "  1. Automatic Download - use this option if your internet is fast or your computer is low end" -ForegroundColor White
+    Write-Log "  2. Extraction from game client (requires client on this machine)" -ForegroundColor White
+    Write-Log "  3. Manual: I will add them myself later in the Data directory." -ForegroundColor White
+    Write-Log ""
+    $choice = Read-HostLog "Enter your choice (1/2/3)"
 
     $dataDir = Join-Path $scriptDir "Data"
     $extractorsDir = Join-Path $scriptDir "Extractors"
@@ -1052,23 +1126,23 @@ if ($dataSetupDone) {
     {
     "1"
     {
-        Write-Host ""
-        Write-Host "[Data] Downloading data files from Google Drive..." -ForegroundColor Cyan
+        Write-Log ""
+        Write-Log "[Data] Downloading data files from Google Drive..." -ForegroundColor Cyan
         if ($dataTotal -eq 0) {
-            Write-Host "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
+            Write-Log "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
         } else {
             Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"]
-            Write-Host "[Data] Data files downloaded and extracted." -ForegroundColor Green
+            Write-Log "[Data] Data files downloaded and extracted." -ForegroundColor Green
         }
     }
     "2"
     {
-        Write-Host ""
-        Write-Host "[Data] Extraction from game client" -ForegroundColor Cyan
-        $clientPath = Read-Host "Enter the FULL path to your World of Warcraft game client installation"
+        Write-Log ""
+        Write-Log "[Data] Extraction from game client" -ForegroundColor Cyan
+        $clientPath = Read-HostLog "Enter the FULL path to your World of Warcraft game client installation"
         if (!(Test-Path $clientPath)) {
-            Write-Host "[Error] Path not found: $clientPath" -ForegroundColor Red
-            Write-Host "[Data] Skipping extraction." -ForegroundColor DarkGray
+            Write-Log "[Error] Path not found: $clientPath" -ForegroundColor Red
+            Write-Log "[Data] Skipping extraction." -ForegroundColor DarkGray
             break
         }
 
@@ -1091,74 +1165,74 @@ if ($dataSetupDone) {
         }
 
         # Step 1: map_extractor (output: Data/*.map, Data/*.db2, etc.)
-        Write-Host ""
-        Write-Host "[Data] Step 1/4: mapextractor" -ForegroundColor Cyan
+        Write-Log ""
+        Write-Log "[Data] Step 1/4: mapextractor" -ForegroundColor Cyan
         if (Test-DirHasFiles $dataDir) {
-            Write-Host "[Data] Skipping mapextractor - Data directory already has files." -ForegroundColor DarkGray
+            Write-Log "[Data] Skipping mapextractor - Data directory already has files." -ForegroundColor DarkGray
         } elseif (Test-Path $mapExtractor) {
             & $mapExtractor "-i" $clientPath "-o" $dataDir
-            Write-Host "[Data] mapextractor complete." -ForegroundColor Green
+            Write-Log "[Data] mapextractor complete." -ForegroundColor Green
         } else {
-            Write-Host "[Data] mapextractor.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
+            Write-Log "[Data] mapextractor.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
         }
 
         # Step 2: vmap4_extractor (output: extractors/Buildings/)
-        Write-Host ""
-        Write-Host "[Data] Step 2/4: vmap4extractor" -ForegroundColor Cyan
+        Write-Log ""
+        Write-Log "[Data] Step 2/4: vmap4extractor" -ForegroundColor Cyan
         if (Test-DirHasFiles $buildingsDir) {
-            Write-Host "[Data] Skipping vmap4extractor - Buildings directory already has files." -ForegroundColor DarkGray
+            Write-Log "[Data] Skipping vmap4extractor - Buildings directory already has files." -ForegroundColor DarkGray
         } elseif (Test-Path $vmapExtractor) {
             Push-Location $extractorsDir
             & $vmapExtractor "-d" $clientPath
             Pop-Location
-            Write-Host "[Data] vmap4extractor complete." -ForegroundColor Green
+            Write-Log "[Data] vmap4extractor complete." -ForegroundColor Green
         } else {
-            Write-Host "[Data] vmap4extractor.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
+            Write-Log "[Data] vmap4extractor.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
         }
 
         # Step 3: vmap4_assembler (output: Data/vmaps/)
-        Write-Host ""
-        Write-Host "[Data] Step 3/4: vmap4assembler" -ForegroundColor Cyan
+        Write-Log ""
+        Write-Log "[Data] Step 3/4: vmap4assembler" -ForegroundColor Cyan
         if (Test-DirHasFiles $vmapsDir) {
-            Write-Host "[Data] Skipping vmap4assembler - vmaps directory already has files." -ForegroundColor DarkGray
+            Write-Log "[Data] Skipping vmap4assembler - vmaps directory already has files." -ForegroundColor DarkGray
         } elseif (Test-Path $vmapAssembler) {
             if (!(Test-Path $vmapsDir)) {
                 New-Item -ItemType Directory -Path $vmapsDir -Force | Out-Null
             }
             & $vmapAssembler $buildingsDir $vmapsDir
-            Write-Host "[Data] vmap4assembler complete." -ForegroundColor Green
+            Write-Log "[Data] vmap4assembler complete." -ForegroundColor Green
         } else {
-            Write-Host "[Data] vmap4assembler.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
+            Write-Log "[Data] vmap4assembler.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
         }
 
         # Step 4: mmaps_generator (output: Data/mmaps/)
-        Write-Host ""
-        Write-Host "[Data] Step 4/4: mmaps_generator" -ForegroundColor Cyan
+        Write-Log ""
+        Write-Log "[Data] Step 4/4: mmaps_generator" -ForegroundColor Cyan
         if (Test-DirHasFiles $mmapsDir) {
-            Write-Host "[Data] Skipping mmaps_generator - mmaps directory already has files." -ForegroundColor DarkGray
+            Write-Log "[Data] Skipping mmaps_generator - mmaps directory already has files." -ForegroundColor DarkGray
         } elseif (Test-Path $mmapsGenerator) {
             & $mmapsGenerator "--input" $dataDir "--output" $dataDir
-            Write-Host "[Data] mmaps_generator complete." -ForegroundColor Green
+            Write-Log "[Data] mmaps_generator complete." -ForegroundColor Green
         } else {
-            Write-Host "[Data] mmaps_generator.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
+            Write-Log "[Data] mmaps_generator.exe not found in $extractorsDir. Skipping." -ForegroundColor Red
         }
 
-        Write-Host ""
-        Write-Host "[Data] Extraction complete. Files saved to $dataDir" -ForegroundColor Green
+        Write-Log ""
+        Write-Log "[Data] Extraction complete. Files saved to $dataDir" -ForegroundColor Green
     }
     "3"
     {
-        Write-Host ""
+        Write-Log ""
         if (!(Test-Path $dataDir)) {
             New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
         }
-        Write-Host "[Data] You chose to add data files manually later." -ForegroundColor Yellow
-        Write-Host "[Data] Place your Maps, Vmaps, MMaps, DB2 files in: $dataDir" -ForegroundColor Yellow
+        Write-Log "[Data] You chose to add data files manually later." -ForegroundColor Yellow
+        Write-Log "[Data] Place your Maps, Vmaps, MMaps, DB2 files in: $dataDir" -ForegroundColor Yellow
     }
     default
     {
-        Write-Host ""
-        Write-Host "[Data] Invalid choice. Skipping data setup." -ForegroundColor Red
+        Write-Log ""
+        Write-Log "[Data] Invalid choice. Skipping data setup." -ForegroundColor Red
     }
 }
     $dataSetupDone = $true
@@ -1174,14 +1248,14 @@ $genAIEnable = 0
 
 if ($config -and $config["GenAISetup"] -eq "1") {
     $genAIEnable = if ($config["GenAIEnable"] -eq "1") { 1 } else { 0 }
-    Write-Host ""
-    Write-Host "[GenAI] GenAI setup already completed (GenAISetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
+    Write-Log ""
+    Write-Log "[GenAI] GenAI setup already completed (GenAISetup=1 in repack.conf). Skipping." -ForegroundColor DarkGray
 } else {
     $genAIEnable = Setup-GenAI
 }
 
-Write-Host ""
-Write-Host ("=" * 80) -ForegroundColor DarkCyan
+Write-Log ""
+Write-Log ("=" * 80) -ForegroundColor DarkCyan
 
 # Step 11: Server Launcher Menu
 $serverDir = Join-Path $scriptDir "Server"
@@ -1194,15 +1268,15 @@ $myIni = Join-Path $mysqlDir "my.ini"
 
 function Ensure-MySQLRunning
 {
-    Write-Host "Checking if MySQL is running..." -ForegroundColor White
+    Write-Log "Checking if MySQL is running..." -ForegroundColor White
     $mysqlProc = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
     if ($mysqlProc) {
-        Write-Host "[MySQL] MySQL is already running." -ForegroundColor Green
+        Write-Log "[MySQL] MySQL is already running." -ForegroundColor Green
     } else {
-        Write-Host "MySQL is not running. Attempting to start the MySQL server." -ForegroundColor Yellow
+        Write-Log "MySQL is not running. Attempting to start the MySQL server." -ForegroundColor Yellow
 
         if (!(Test-Path $mysqldExe)) {
-            Write-Host "[MySQL] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
+            Write-Log "[MySQL] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
             return $false
         }
 
@@ -1216,7 +1290,7 @@ function Ensure-MySQLRunning
             Pop-Location
         }
 
-        Write-Host "[MySQL] Waiting for MySQL to be ready..." -ForegroundColor White
+        Write-Log "[MySQL] Waiting for MySQL to be ready..." -ForegroundColor White
         $mysqlExeCheck = Join-Path $mysqlDir "bin\mysql.exe"
         $mysqlReady = $false
         $maxRetries = 60
@@ -1241,111 +1315,111 @@ function Ensure-MySQLRunning
         }
 
         if (!$mysqlReady) {
-            Write-Host "[MySQL] MySQL did not become ready after $maxRetries seconds." -ForegroundColor Red
+            Write-Log "[MySQL] MySQL did not become ready after $maxRetries seconds." -ForegroundColor Red
             return $false
         }
 
-        Write-Host "[MySQL] MySQL is ready!" -ForegroundColor Green
+        Write-Log "[MySQL] MySQL is ready!" -ForegroundColor Green
     }
 
     return $true
 }
 
 while ($true) {
-    Write-Host ""
-    Write-Host "Repack Ready. What do you want to do?" -ForegroundColor Cyan
-    Write-Host "  1. Start BnetServer" -ForegroundColor White
-    Write-Host "  2. Start WorldServer" -ForegroundColor White
-    Write-Host "  3. Start Both Servers" -ForegroundColor White
-    Write-Host "  4. Start Llama CPP Server" -ForegroundColor White
-    Write-Host "  5. Server Operations" -ForegroundColor White
-    Write-Host "  6. Exit" -ForegroundColor White
-    Write-Host ""
-    $mainChoice = Read-Host "Enter your choice (1/2/3/4/5/6)"
+    Write-Log ""
+    Write-Log "Repack Ready. What do you want to do?" -ForegroundColor Cyan
+    Write-Log "  1. Start BnetServer" -ForegroundColor White
+    Write-Log "  2. Start WorldServer" -ForegroundColor White
+    Write-Log "  3. Start Both Servers" -ForegroundColor White
+    Write-Log "  4. Start Llama CPP Server" -ForegroundColor White
+    Write-Log "  5. Server Operations" -ForegroundColor White
+    Write-Log "  6. Exit" -ForegroundColor White
+    Write-Log ""
+    $mainChoice = Read-HostLog "Enter your choice (1/2/3/4/5/6)"
 
     switch ($mainChoice) {
         "1" {
             if (!(Ensure-MySQLRunning)) {
-                Write-Host "[Server] Cannot start BnetServer without MySQL." -ForegroundColor Red
+                Write-Log "[Server] Cannot start BnetServer without MySQL." -ForegroundColor Red
                 break
             }
             if (Test-Path $bnetExe) {
-                Write-Host "[Server] Starting BnetServer..." -ForegroundColor Green
+                Write-Log "[Server] Starting BnetServer..." -ForegroundColor Green
                 Start-Process -FilePath $bnetExe -WorkingDirectory $serverDir
             } else {
-                Write-Host "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
+                Write-Log "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
             }
         }
         "2" {
             if (!(Ensure-MySQLRunning)) {
-                Write-Host "[Server] Cannot start WorldServer without MySQL." -ForegroundColor Red
+                Write-Log "[Server] Cannot start WorldServer without MySQL." -ForegroundColor Red
                 break
             }
             if (Test-Path $worldExe) {
-                Write-Host "[Server] Starting WorldServer..." -ForegroundColor Green
+                Write-Log "[Server] Starting WorldServer..." -ForegroundColor Green
                 Start-Process -FilePath $worldExe -WorkingDirectory $serverDir
             } else {
-                Write-Host "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
+                Write-Log "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
             }
         }
         "3" {
             if (!(Ensure-MySQLRunning)) {
-                Write-Host "[Server] Cannot start servers without MySQL." -ForegroundColor Red
+                Write-Log "[Server] Cannot start servers without MySQL." -ForegroundColor Red
                 break
             }
             if (Test-Path $bnetExe) {
-                Write-Host "[Server] Starting BnetServer..." -ForegroundColor Green
+                Write-Log "[Server] Starting BnetServer..." -ForegroundColor Green
                 Start-Process -FilePath $bnetExe -WorkingDirectory $serverDir
             } else {
-                Write-Host "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
+                Write-Log "[Server] bnetserver.exe not found at: $bnetExe" -ForegroundColor Red
             }
             if (Test-Path $worldExe) {
-                Write-Host "[Server] Starting WorldServer..." -ForegroundColor Green
+                Write-Log "[Server] Starting WorldServer..." -ForegroundColor Green
                 Start-Process -FilePath $worldExe -WorkingDirectory $serverDir
             } else {
-                Write-Host "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
+                Write-Log "[Server] worldserver.exe not found at: $worldExe" -ForegroundColor Red
             }
         }
         "4" {
             $llamaServer = Join-Path $scriptDir "GenerativeAI\cuda\llama-server.exe"
             if (!(Test-Path $llamaServer)) {
-                Write-Host "[GenAI] llama-server.exe not found at: $llamaServer" -ForegroundColor Red
-                Write-Host "[GenAI] You need to download the GenAI server files first." -ForegroundColor Yellow
+                Write-Log "[GenAI] llama-server.exe not found at: $llamaServer" -ForegroundColor Red
+                Write-Log "[GenAI] You need to download the GenAI server files first." -ForegroundColor Yellow
                 $genAIEnable = Setup-GenAI -Force
             } else {
-                Write-Host "[GenAI] Starting Llama CPP Server (CUDA)..." -ForegroundColor Green
+                Write-Log "[GenAI] Starting Llama CPP Server (CUDA)..." -ForegroundColor Green
                 $genaiCudaDir = Join-Path $scriptDir "GenerativeAI\cuda"
                 $genaiArgs = '-m ..\models\Qwen3-4B-Q4_K_M.gguf --chat-template-file ..\models\templates\Qwen3.5-4B.jinja --reasoning off --ctx-size 8192 --gpu-layers 60 --parallel 1 --no-warmup'
                 Start-Process -FilePath $llamaServer -ArgumentList $genaiArgs -WorkingDirectory $genaiCudaDir
-                Write-Host "[GenAI] Llama CPP Server started in new window." -ForegroundColor Green
+                Write-Log "[GenAI] Llama CPP Server started in new window." -ForegroundColor Green
             }
         }
         "5" {
             while ($true) {
-                Write-Host ""
-                Write-Host "Server Operations:" -ForegroundColor Cyan
-                Write-Host "  1. Kill MySQL Process" -ForegroundColor White
-                Write-Host "  2. Start MySQL Server" -ForegroundColor White
-                Write-Host "  3. Back" -ForegroundColor White
-                Write-Host ""
-                $opsChoice = Read-Host "Enter your choice (1/2/3)"
+                Write-Log ""
+                Write-Log "Server Operations:" -ForegroundColor Cyan
+                Write-Log "  1. Kill MySQL Process" -ForegroundColor White
+                Write-Log "  2. Start MySQL Server" -ForegroundColor White
+                Write-Log "  3. Back" -ForegroundColor White
+                Write-Log ""
+                $opsChoice = Read-HostLog "Enter your choice (1/2/3)"
 
                 switch ($opsChoice) {
                     "1" {
                         $mysqlProc = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
                         if ($mysqlProc) {
-                            Write-Host "[Ops] Stopping MySQL process..." -ForegroundColor Yellow
+                            Write-Log "[Ops] Stopping MySQL process..." -ForegroundColor Yellow
                             $mysqlProc | Stop-Process -Force
-                            Write-Host "[Ops] MySQL process stopped." -ForegroundColor Green
+                            Write-Log "[Ops] MySQL process stopped." -ForegroundColor Green
                         } else {
-                            Write-Host "[Ops] MySQL process is not running." -ForegroundColor DarkGray
+                            Write-Log "[Ops] MySQL process is not running." -ForegroundColor DarkGray
                         }
                     }
                     "2" {
                         if (!(Test-Path $mysqldExe)) {
-                            Write-Host "[Ops] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
+                            Write-Log "[Ops] mysqld.exe not found at: $mysqldExe" -ForegroundColor Red
                         } else {
-                            Write-Host "[Ops] Starting MySQL..." -ForegroundColor Yellow
+                            Write-Log "[Ops] Starting MySQL..." -ForegroundColor Yellow
                             if (Test-Path $myIni) {
                                 Push-Location $mysqlDir
                                 Start-Process -FilePath $mysqldExe -ArgumentList "--defaults-file=`"$myIni`"" -NoNewWindow -PassThru | Out-Null
@@ -1355,25 +1429,26 @@ while ($true) {
                                 Start-Process -FilePath $mysqldExe -NoNewWindow -PassThru | Out-Null
                                 Pop-Location
                             }
-                            Write-Host "[Ops] MySQL started." -ForegroundColor Green
+                            Write-Log "[Ops] MySQL started." -ForegroundColor Green
                         }
                     }
                     "3" {
                         break
                     }
                     default {
-                        Write-Host "[Ops] Invalid choice." -ForegroundColor Red
+                        Write-Log "[Ops] Invalid choice." -ForegroundColor Red
                     }
                 }
                 if ($opsChoice -eq "3") { break }
             }
         }
         "6" {
-            Write-Host "[Server] Exiting." -ForegroundColor Yellow
+            Write-Log "[Server] Exiting." -ForegroundColor Yellow
+            Write-Log "Script terminated."
             exit
         }
         default {
-            Write-Host "[Server] Invalid choice." -ForegroundColor Red
+            Write-Log "[Server] Invalid choice." -ForegroundColor Red
         }
     }
 }
