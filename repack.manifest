@@ -5,7 +5,7 @@ serverlib=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/
 mapextractors=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/Extractors.zip]
 sqlbase=[28082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/SqlBase.zip]
 bnetserver=[08202026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/BnetServer.zip]
-worldserver=[26082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/WorldServer.zip]
+worldserver=[29082026-00, https://github.com/stevebone/FoundryCoreRepack/raw/refs/heads/main/packages/WorldServer.zip]
 [sql]
 [other]
 [gdrive]
