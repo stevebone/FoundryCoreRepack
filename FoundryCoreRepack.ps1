@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "28082026-00"
+$scriptVersion = "03092026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -346,6 +346,22 @@ function Get-SqlRelativePath
     return "sql/$fileName"
 }
 
+function Invoke-PreExtractionHook
+{
+    param([string]$Id)
+
+    if ($Id -eq "sqlbase")
+    {
+        $sqlDir = Join-Path $scriptDir "Sql"
+        if (Test-Path $sqlDir)
+        {
+            Write-Log "  [PreExtract] Cleaning existing Sql directory..." -NoNewline -ForegroundColor DarkYellow
+            Remove-Item -Path $sqlDir -Recurse -Force
+            Write-Log " Done." -ForegroundColor Green
+        }
+    }
+}
+
 function Download-ZipFiles
 {
     param($Files)
@@ -370,6 +386,7 @@ function Download-ZipFiles
             continue
         }
 
+        Invoke-PreExtractionHook -Id $id
         Write-Log "  Extracting: $fileName..." -NoNewline -ForegroundColor White
         try
         {
@@ -804,6 +821,7 @@ function Download-GdriveFiles
             continue
         }
 
+        Invoke-PreExtractionHook -Id $id
         Write-Log "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
         try
         {
@@ -871,6 +889,7 @@ function Download-DataFiles
             continue
         }
 
+        Invoke-PreExtractionHook -Id $id
         Write-Log "  Extracting: $id.zip..." -NoNewline -ForegroundColor White
         try
         {
