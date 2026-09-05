@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "03092026-00"
+$scriptVersion = "05092026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -1419,9 +1419,10 @@ while ($true) {
                 Write-Log "Server Operations:" -ForegroundColor Cyan
                 Write-Log "  1. Kill MySQL Process" -ForegroundColor White
                 Write-Log "  2. Start MySQL Server" -ForegroundColor White
-                Write-Log "  3. Back" -ForegroundColor White
+                Write-Log "  3. Server Data Files" -ForegroundColor White
+                Write-Log "  4. Back" -ForegroundColor White
                 Write-Log ""
-                $opsChoice = Read-HostLog "Enter your choice (1/2/3)"
+                $opsChoice = Read-HostLog "Enter your choice (1/2/3/4)"
 
                 switch ($opsChoice) {
                     "1" {
@@ -1452,13 +1453,50 @@ while ($true) {
                         }
                     }
                     "3" {
+                        while ($true) {
+                            Write-Log ""
+                            Write-Log "Server Data Files:" -ForegroundColor Cyan
+                            Write-Log "  1. Redownload DBC data files" -ForegroundColor White
+                            Write-Log "  2. Redownload Maps" -ForegroundColor White
+                            Write-Log "  3. Redownload VMaps" -ForegroundColor White
+                            Write-Log "  4. Redownload MMaps" -ForegroundColor White
+                            Write-Log "  5. Redownload ALL" -ForegroundColor White
+                            Write-Log "  6. Back" -ForegroundColor White
+                            Write-Log ""
+                            $dataChoice = Read-HostLog "Enter your choice (1/2/3/4/5/6)"
+
+                            switch ($dataChoice) {
+                                { $_ -ge "1" -and $_ -le "4" } {
+                                    $dataIds = @("dbc", "maps", "vmaps", "mmaps")
+                                    $selectedId = $dataIds[[int]$dataChoice - 1]
+                                    $singleData = [ordered]@{ $selectedId = $sections["data"][$selectedId] }
+                                    $singleMirror = [ordered]@{}
+                                    if ($sections["datamirror"].Contains($selectedId)) {
+                                        $singleMirror[$selectedId] = $sections["datamirror"][$selectedId]
+                                    }
+                                    Download-DataFiles -DataFiles $singleData -MirrorFiles $singleMirror
+                                }
+                                "5" {
+                                    Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"]
+                                }
+                                "6" {
+                                    break
+                                }
+                                default {
+                                    Write-Log "[Data] Invalid choice." -ForegroundColor Red
+                                }
+                            }
+                            if ($dataChoice -eq "6") { break }
+                        }
+                    }
+                    "4" {
                         break
                     }
                     default {
                         Write-Log "[Ops] Invalid choice." -ForegroundColor Red
                     }
                 }
-                if ($opsChoice -eq "3") { break }
+                if ($opsChoice -eq "4") { break }
             }
         }
         "6" {
