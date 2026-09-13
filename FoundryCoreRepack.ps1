@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "05092026-00"
+$scriptVersion = "13092026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -357,6 +357,17 @@ function Invoke-PreExtractionHook
         {
             Write-Log "  [PreExtract] Cleaning existing Sql directory..." -NoNewline -ForegroundColor DarkYellow
             Remove-Item -Path $sqlDir -Recurse -Force
+            Write-Log " Done." -ForegroundColor Green
+        }
+    }
+
+    if ($Id -eq "mysql")
+    {
+        $mysqlDir = Join-Path $scriptDir "Dep\mysql"
+        if (Test-Path $mysqlDir)
+        {
+            Write-Log "  [PreExtract] Cleaning existing MySQL directory..." -NoNewline -ForegroundColor DarkYellow
+            Remove-Item -Path $mysqlDir -Recurse -Force
             Write-Log " Done." -ForegroundColor Green
         }
     }
