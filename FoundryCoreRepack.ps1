@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$scriptVersion = "13092026-00"
+$scriptVersion = "16102026-00"
 $configFile = Join-Path $scriptDir "repack.conf"
 $manifestFile = Join-Path $scriptDir "repack.manifest"
 $manifestTempFile = Join-Path $scriptDir "repack.manifest.tmp"
@@ -858,10 +858,12 @@ function Download-DataFiles
         $MirrorFiles
     )
 
+    $failedIds = @()
+
     if ($DataFiles.Count -eq 0)
     {
         Write-Log "[Data] No data files to download." -ForegroundColor DarkGray
-        return
+        return ,$failedIds
     }
 
     Write-Log ""
@@ -897,6 +899,7 @@ function Download-DataFiles
 
         if (!$downloaded) {
             Write-Log "  [$id] FAILED - no source available." -ForegroundColor Red
+            $failedIds += $id
             continue
         }
 
@@ -911,12 +914,68 @@ function Download-DataFiles
         {
             Write-Log " FAILED!" -ForegroundColor Red
             Write-Log "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            $failedIds += $id
         }
 
         if (Test-Path $tempZip) {
             Remove-Item $tempZip -Force
         }
     }
+
+    return ,$failedIds
+}
+
+function Invoke-DataFileDownload
+{
+    param([string]$Id)
+
+    $singleData = [ordered]@{ $Id = $sections["data"][$Id] }
+    $singleMirror = [ordered]@{}
+    if ($sections["datamirror"].Contains($Id)) {
+        $singleMirror[$Id] = $sections["datamirror"][$Id]
+    }
+    $failed = Download-DataFiles -DataFiles $singleData -MirrorFiles $singleMirror
+    return ($failed -notcontains $Id)
+}
+
+function Restore-ManifestDataVersion
+{
+    param(
+        [string]$Id,
+        [string]$ManifestPath
+    )
+
+    if (!(Test-Path $ManifestPath)) { return }
+
+    $oldVersion = $null
+    if ($localSections -and $localSections["data"].Contains($Id)) {
+        $oldVersion = $localSections["data"][$Id].Version
+    }
+
+    $idPattern = [regex]::Escape($Id)
+    $outLines = @()
+    $currentSection = ""
+    foreach ($line in (Get-Content $ManifestPath))
+    {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(.+)\]$')
+        {
+            $currentSection = $Matches[1].ToLower()
+            $outLines += $line
+            continue
+        }
+        if ($currentSection -eq "data" -and $trimmed -match "^$idPattern\s*=\s*\[(.+?),\s*(.+)\]$")
+        {
+            if ($oldVersion) {
+                # Keep old local version (with remote URL) so the update is re-detected next run
+                $outLines += "$Id=[$oldVersion, $($Matches[2])]"
+            }
+            # else: no local version existed (NEW file) - drop the line so it stays NEW
+            continue
+        }
+        $outLines += $line
+    }
+    Set-Content -Path $ManifestPath -Value $outLines -Encoding UTF8
 }
 
 function Setup-GenAI
@@ -1108,6 +1167,54 @@ Download-GdriveFiles -Files $changed["gdrive"]
 Download-SqlFiles -Files $changed["sql"]
 Download-OtherFiles -Files $changed["other"]
 
+# Step 5b: Prompt for changed data files (only when Server Data Setup would otherwise be skipped)
+$dataSetupDoneEarly = !$isFirstTime -and $config["ServerDataSetup"] -eq "1"
+$failedDataIds = @()
+if ($dataSetupDoneEarly -and $changed["data"].Count -gt 0)
+{
+    $dataDisplayNames = @{ "dbc" = "DBC"; "maps" = "Maps"; "vmaps" = "VMaps"; "mmaps" = "MMaps" }
+    foreach ($id in $sections["data"].Keys)
+    {
+        if (!$changed["data"].Contains($id)) { continue }
+        $displayName = if ($dataDisplayNames.Contains($id)) { $dataDisplayNames[$id] } else { $id }
+
+        while ($true)
+        {
+            Write-Log ""
+            Write-Log "$displayName data files need to be updated. How do you want to proceed?" -ForegroundColor Yellow
+            Write-Log "  1. Download the updated data file" -ForegroundColor White
+            Write-Log "  2. Skip, I will manually update it myself." -ForegroundColor White
+            Write-Log ""
+            $dataUpdateChoice = Read-HostLog "Enter your choice (1/2)"
+
+            if ($dataUpdateChoice -eq "1")
+            {
+                if (!(Invoke-DataFileDownload -Id $id))
+                {
+                    $failedDataIds += $id
+                    Write-Log "[Data] $displayName update failed - keeping old version in manifest." -ForegroundColor Red
+                }
+                break
+            }
+            elseif ($dataUpdateChoice -eq "2")
+            {
+                Write-Log "[Data] Skipping $displayName update - you can update it manually." -ForegroundColor DarkGray
+                break
+            }
+            else
+            {
+                Write-Log "[Data] Invalid choice." -ForegroundColor Red
+            }
+        }
+    }
+
+    # Failed downloads keep their old local version so the prompt reappears next launch
+    foreach ($id in $failedDataIds)
+    {
+        Restore-ManifestDataVersion -Id $id -ManifestPath $manifestTempFile
+    }
+}
+
 # Save remote manifest as local for next run's comparison
 Move-Item -Path $manifestTempFile -Destination $manifestFile -Force
 
@@ -1161,7 +1268,7 @@ if ($dataSetupDone) {
         if ($dataTotal -eq 0) {
             Write-Log "[Data] No data files found in manifest. Skipping." -ForegroundColor DarkGray
         } else {
-            Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"]
+            Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"] | Out-Null
             Write-Log "[Data] Data files downloaded and extracted." -ForegroundColor Green
         }
     }
@@ -1480,15 +1587,10 @@ while ($true) {
                                 { $_ -ge "1" -and $_ -le "4" } {
                                     $dataIds = @("dbc", "maps", "vmaps", "mmaps")
                                     $selectedId = $dataIds[[int]$dataChoice - 1]
-                                    $singleData = [ordered]@{ $selectedId = $sections["data"][$selectedId] }
-                                    $singleMirror = [ordered]@{}
-                                    if ($sections["datamirror"].Contains($selectedId)) {
-                                        $singleMirror[$selectedId] = $sections["datamirror"][$selectedId]
-                                    }
-                                    Download-DataFiles -DataFiles $singleData -MirrorFiles $singleMirror
+                                    Invoke-DataFileDownload -Id $selectedId | Out-Null
                                 }
                                 "5" {
-                                    Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"]
+                                    Download-DataFiles -DataFiles $sections["data"] -MirrorFiles $sections["datamirror"] | Out-Null
                                 }
                                 "6" {
                                     break
